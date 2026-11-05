@@ -17,8 +17,8 @@ they drift apart.
 
 | Target | Runner | Notes |
 |---|---|---|
-| `linux-x64-gnu` | `ubuntu-24.04` | glibc floor measured from the binary; at most 2.39 |
-| `linux-arm64-gnu` | `ubuntu-24.04-arm` | as above |
+| `linux-x64-gnu` | `ubuntu-22.04` | glibc floor measured from the binary; at most 2.35 |
+| `linux-arm64-gnu` | `ubuntu-22.04-arm` | as above |
 | `darwin-arm64` | `macos-15` | `MACOSX_DEPLOYMENT_TARGET=11.0` |
 | `win32-x64` | `windows-2025` | static C runtime (`+crt-static`) |
 

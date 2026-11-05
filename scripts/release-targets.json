@@ -5,8 +5,8 @@
     "arch": "x64",
     "executable": "dsd",
     "rustTarget": "x86_64-unknown-linux-gnu",
-    "runner": "ubuntu-24.04",
-    "maxGlibc": "2.39"
+    "runner": "ubuntu-22.04",
+    "maxGlibc": "2.35"
   },
   {
     "id": "linux-arm64-gnu",
@@ -14,8 +14,8 @@
     "arch": "arm64",
     "executable": "dsd",
     "rustTarget": "aarch64-unknown-linux-gnu",
-    "runner": "ubuntu-24.04-arm",
-    "maxGlibc": "2.39"
+    "runner": "ubuntu-22.04-arm",
+    "maxGlibc": "2.35"
   },
   {
     "id": "darwin-arm64",

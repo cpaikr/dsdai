@@ -59,8 +59,8 @@ Installation needs no login, Rust, Python, source checkout, or GitHub CLI.
 
 | Platform | `<target>` | Installer | Requires |
 |---|---|---|---|
-| Linux GNU x64 | `linux-x64-gnu` | `install.sh` | glibc 2.39 or newer (for example Ubuntu 24.04) |
-| Linux GNU ARM64 | `linux-arm64-gnu` | `install.sh` | glibc 2.39 or newer |
+| Linux GNU x64 | `linux-x64-gnu` | `install.sh` | glibc 2.35 or newer (for example Ubuntu 22.04 or Debian 12) |
+| Linux GNU ARM64 | `linux-arm64-gnu` | `install.sh` | glibc 2.35 or newer |
 | macOS Apple Silicon | `darwin-arm64` | `install.sh` | macOS 11 or newer |
 | Windows x64 | `win32-x64` | `install.ps1` | Windows 10 (1803) or newer, PowerShell 5.1 or newer |
 
