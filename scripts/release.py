@@ -535,10 +535,13 @@ def publish(repository: str, tag: str, sha: str, bundle: Path, gh: Gh = system_g
     release = read_release()
     existed = release is not None
     if release is None:
-        gh(["release", "create", tag, "--repo", repository, "--target", sha, "--verify-tag", "--draft",
-            "--title", tag, "--generate-notes"])
+        created = gh(["release", "create", tag, "--repo", repository, "--target", sha, "--verify-tag", "--draft",
+                      "--title", tag, "--generate-notes"])
+        # A concurrent run may have created it first; only a still-missing
+        # release is a failure, reported with gh's own error.
         release = read_release()
-        require(release is not None, "The draft release could not be verified after creation.")
+        require(release is not None,
+                f"The draft release could not be created: {(created.stderr or created.stdout).strip()}")
     verify_downloads(release, complete=not release["isDraft"])
     if release["isDraft"]:
         present = {asset["name"] for asset in release["assets"]}
