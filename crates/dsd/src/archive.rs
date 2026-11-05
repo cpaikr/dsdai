@@ -18,6 +18,8 @@ pub const META: &str = "meta.xml";
 pub const MAX_ARCHIVE_BYTES: u64 = 200 * 1024 * 1024;
 pub const MAX_MEMBER_BYTES: u64 = 200 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 2000;
+/// Bound on the declared decompressed size of all members together.
+pub const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
 const FLAG_ENCRYPTED: u16 = 0x0001;
 const FLAG_DATA_DESCRIPTOR: u16 = 0x0008;
@@ -225,6 +227,7 @@ pub fn read_archive(path: &Path) -> Result<Archive> {
     }
 
     let mut members = Vec::with_capacity(total_entries);
+    let mut total_size: u64 = 0;
     let mut seen = HashSet::new();
     let mut at = cd_offset + concat;
     for _ in 0..total_entries {
@@ -270,6 +273,10 @@ pub fn read_archive(path: &Path) -> Result<Archive> {
         }
         if size > MAX_MEMBER_BYTES {
             return Err(bad(format!("member {name:?} is too large")));
+        }
+        total_size = total_size.saturating_add(size);
+        if total_size > MAX_TOTAL_BYTES {
+            return Err(bad(format!("members decompress to more than {MAX_TOTAL_BYTES} bytes")));
         }
         if method != METHOD_STORED && method != METHOD_DEFLATED {
             return Err(bad(format!("member {name:?} uses unsupported compression {method}")));

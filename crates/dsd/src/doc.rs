@@ -206,6 +206,9 @@ impl Doc {
     }
 }
 
+/// Bound on a grid width inferred from COLSPAN values when no COLGROUP exists.
+const MAX_INFERRED_COLS: usize = 4096;
+
 pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
     let mut cols: Vec<i64> = Vec::new();
     let mut rows: Vec<NodeId> = Vec::new();
@@ -233,11 +236,14 @@ pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
                     .iter()
                     .filter(|&&c| is_cell(tree.tag(c)))
                     .map(|&c| int_attr(tree, c, "COLSPAN"))
-                    .sum::<usize>()
+                    .fold(0usize, usize::saturating_add)
             })
             .max()
             .unwrap_or(0);
-        cols = vec![0; widest];
+        if widest > MAX_INFERRED_COLS {
+            issues.push(format!("rows span {widest} columns; the grid is limited to {MAX_INFERRED_COLS}"));
+        }
+        cols = vec![0; widest.min(MAX_INFERRED_COLS)];
     }
     let ncols = cols.len();
     let nrows = rows.len();
@@ -255,23 +261,22 @@ pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
             let (rs, cs) = (int_attr(tree, cnode, "ROWSPAN"), int_attr(tree, cnode, "COLSPAN"));
             let cell_index = cells.len();
             cells.push(Cell { node: cnode, row: ri + 1, col: ci + 1, rowspan: rs, colspan: cs });
-            if ci + cs > ncols {
+            if ci.saturating_add(cs) > ncols {
                 issues.push(format!("R{}C{}: cell spans past the {ncols} declared columns", ri + 1, ci + 1));
             }
-            if ri + rs > nrows {
+            if ri.saturating_add(rs) > nrows {
                 issues.push(format!("R{}C{}: ROWSPAN {rs} runs past the last row", ri + 1, ci + 1));
             }
-            for a in 0..rs {
-                for b in 0..cs {
-                    if ri + a < nrows && ci + b < ncols {
-                        if grid[ri + a][ci + b].is_some() {
-                            issues.push(format!("R{}C{}: overlapping cells", ri + a + 1, ci + b + 1));
-                        }
-                        grid[ri + a][ci + b] = Some(cell_index);
+            // Only grid positions inside the table exist; a huge span costs no more than the grid.
+            for a in 0..rs.min(nrows - ri) {
+                for b in 0..cs.min(ncols.saturating_sub(ci)) {
+                    if grid[ri + a][ci + b].is_some() {
+                        issues.push(format!("R{}C{}: overlapping cells", ri + a + 1, ci + b + 1));
                     }
+                    grid[ri + a][ci + b] = Some(cell_index);
                 }
             }
-            ci += cs;
+            ci = ci.saturating_add(cs);
         }
     }
     for (ri, row) in grid.iter().enumerate() {

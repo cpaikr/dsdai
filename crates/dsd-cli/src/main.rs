@@ -42,7 +42,15 @@ fn command_name(argv: &[String]) -> String {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().collect();
+    let argv_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // Arguments that are not valid Unicode cannot name anything this tool
+    // matches, so they are an invalid invocation rather than a panic.
+    let Some(argv) = argv_os.iter().map(|a| a.to_str().map(str::to_owned)).collect::<Option<Vec<String>>>() else {
+        let failure =
+            Failure::usage("arguments must be valid Unicode".to_owned(), "run `dsd --help` for commands".to_owned());
+        write_stdout(&Envelope::failure("", &failure).render(false));
+        return ExitCode::from(2);
+    };
     let pretty = argv.iter().any(|a| a == "--pretty");
     // Bare `dsd` is exactly `dsd --help`: the same parser renders both.
     let parse_args = if argv.len() == 1 { vec![argv[0].clone(), "--help".to_owned()] } else { argv.clone() };

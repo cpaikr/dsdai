@@ -646,7 +646,7 @@ pub struct FindResult {
     pub query: String,
     pub exact: bool,
     pub matches: Vec<FindMatch>,
-    /// True when the search stopped at the limit.
+    /// True when the search stopped because it reached the limit.
     pub limited: bool,
 }
 
@@ -660,10 +660,6 @@ pub fn find(doc: &Doc, query: &str, exact: bool, limit: usize) -> Result<FindRes
     for block in blocks(doc) {
         let hay = if exact { block.text.clone() } else { compact(&block.text) };
         if hay.contains(&target) {
-            if matches.len() == limit {
-                limited = true;
-                break;
-            }
             matches.push(FindMatch {
                 locator: block.locator,
                 line: block.line,
@@ -671,6 +667,10 @@ pub fn find(doc: &Doc, query: &str, exact: bool, limit: usize) -> Result<FindRes
                 text: block.text,
                 unverified: block.unverified,
             });
+            if matches.len() == limit {
+                limited = true;
+                break;
+            }
         }
     }
     Ok(FindResult { query: query.to_owned(), exact, matches, limited })

@@ -134,6 +134,8 @@ cells with `dsd table`; images stay in the archive (see `dsd extract`).")]
     /// Locate text in cells and paragraphs, ignoring whitespace unless --exact.
     Find {
         file: PathBuf,
+        /// Text to find; may start with '-'.
+        #[arg(allow_hyphen_values = true)]
         text: String,
         /// Match whitespace exactly.
         #[arg(long)]
