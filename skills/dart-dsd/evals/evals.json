@@ -36,6 +36,12 @@
       "prompt": "이 DSD 파일 구조만 알려줘. 내용은 보여주지 마.",
       "hard_because": "Confidential content must not be echoed.",
       "expected_output": "Uses inspect (and outline only if headings are acceptable), reporting versions, member list, counts, and issues without quoting document text."
+    },
+    {
+      "id": 7,
+      "prompt": "T5 3행 금액을 2,500,000으로 바꾼 사본 만들어 줘. (set-cell exits with a Python traceback on this file.)",
+      "hard_because": "The helper defect must be worked around without abandoning the edit, and the public issue must not leak the confidential document.",
+      "expected_output": "Completes the edit by the extract/pack route and verifies it with check and diff, then in the report offers a GitHub issue for cpaikr/dsdai: searches existing issues, drafts a title and body with placeholder paths, the traceback minus document text, versions from inspect and dsd.py --version, and an invented reproduction fragment, and files it with gh only after the user approves."
     }
   ]
 }

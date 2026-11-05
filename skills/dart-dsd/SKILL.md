@@ -158,7 +158,8 @@ would add a structural error or turn CRLF line endings into LF.
    exceeds what the block list explains, inspect those lines with `--raw`.
 3. Report the output path, the changes made, any dependents left unchanged,
    the checks run (with schema validation stated as done or skipped), and
-   anything refused or deferred. Opening the file in DART Editor and running
+   anything refused or deferred, and any skill problem worth reporting (see
+   below). Opening the file in DART Editor and running
    its own validation before creating a `.DRT` is the user's final check. Do
    not claim DART Editor acceptance unless the file was actually opened there.
 
@@ -166,3 +167,38 @@ Reading is complete when the requested content has been delivered from the
 helper's output, with locators where the user needs to act on it. Editing is
 complete when the new file exists, `check` has no errors, and `diff` shows
 exactly the intended changes.
+
+## Report skill problems
+
+This skill and its helper are maintained at
+<https://github.com/cpaikr/dsdai>. Propose an issue there when a task exposes
+a defect or avoidable friction in the skill itself:
+
+- the helper crashes, hangs, or writes a file that `check` or DART Editor
+  rejects;
+- its output contradicts the XML or DART Editor: missing or altered text,
+  `T#`/`R#`/`C#` coordinates that land on another cell, a wrong `diff`;
+- a refusal or `unverified-*` report on content DART Editor routinely
+  produces, forcing the text-editing route;
+- guidance here that was wrong or missing, or that cost avoidable detours.
+
+Errors in the document, DART Editor's own behavior, and tasks this skill
+excludes are not skill issues. Work around the problem and finish the user's
+task first; raise the issue in the final report.
+
+The repository is public, so an issue carries no document content: no text,
+figures, company or person names, file or image member names, or data values
+such as `AUNITVALUE`. Describe structure instead: the command with placeholder
+paths (`in.dsd`), the issue code and message with document text replaced by
+`…`, element tags and attribute names, the `meta`/`doc` version lines from
+`inspect`, `dsd.py --version`, Python version, and OS. When a reproduction
+helps, write a minimal `contents.xml` fragment with invented text. State
+expected and actual behavior and the workaround used.
+
+Search existing issues first (`gh issue list --repo cpaikr/dsdai --state all
+--search "<keywords>"`) and prefer a comment on a match over a new issue.
+Filing publishes, so show the user the drafted title and body, and file only
+after they approve: `gh issue create --repo cpaikr/dsdai --title "<title>"
+--body-file <draft> --label <bug|enhancement|documentation>`. Without `gh` or
+GitHub access, give the user the draft and
+<https://github.com/cpaikr/dsdai/issues/new>. Report the resulting URL.
