@@ -238,7 +238,7 @@ class EditTests(DsdTestCase):
         self.assertIn("AUNITVALUE='20251231'", err)
         code, _, err = run(*args, "--unit-value", "20261230", "-o", str(self.out("a.dsd")))
         self.assertEqual(code, 1)
-        self.assertIn("make them agree", err)
+        self.assertIn("text shows date 20261231 but AUNITVALUE is 20261230", err)
         self.assertFalse(self.out("a.dsd").exists())
         code, out, err = run(*args, "--unit-value", "20261231", "-o", str(self.out("b.dsd")))
         self.assertEqual(code, 0, err)
@@ -274,6 +274,36 @@ class EditTests(DsdTestCase):
         self.assertIn("period-mismatch", out)
         code, out, _ = run("check", str(self.out()), "--no-schema")
         self.assertIn("PERIODTO/PERIODTO2 TU cells disagree: T1R2C1=20261231, T1R2C2=20251231", out)
+
+    def test_currency_unit_value_is_a_code(self) -> None:
+        unit = '<TU ALIGN="RIGHT" AUNIT="WON" AUNITVALUE="1" HEIGHT="23" WIDTH="249">(단위 : 원)</TU>'
+        xml = contents_of(self.src).replace("<TD HEIGHT=\"23\" WIDTH=\"249\">까지</TD>", unit, 1)
+        variant = self._with_contents(xml)
+        code, out, _ = run("check", str(variant), "--no-schema")
+        self.assertNotIn("unit-value", out)
+        args = ["set-cell", str(variant), "--table", "1", "--row", "2", "--col", "2", "--text", "(단위 : 천원)"]
+        # A multiplier looks plausible but is not the stored code.
+        code, _, err = run(*args, "--unit-value", "1000", "-o", str(self.out("a.dsd")))
+        self.assertEqual(code, 1)
+        self.assertIn("AUNIT=WON takes a code (1=원, 2=천원, 3=백만원), not '1000'", err)
+        self.assertFalse(self.out("a.dsd").exists())
+        code, _, err = run(*args, "--unit-value", "3", "-o", str(self.out("b.dsd")))
+        self.assertEqual(code, 1)
+        self.assertIn("text shows 천원 (code 2) but AUNITVALUE is 3 (백만원)", err)
+        code, _, err = run(*args, "--unit-value", "2", "-o", str(self.out("c.dsd")))
+        self.assertEqual(code, 0, err)
+        self.assertIn('AUNITVALUE="2"', contents_of(self.out("c.dsd")))
+        # 원 inside a word is not the unit; the labelled unit decides.
+        code, _, err = run("set-cell", str(variant), "--table", "1", "--row", "2", "--col", "2",
+                           "--text", "직원 (단위 : 천원)", "--unit-value", "2", "-o", str(self.out("d.dsd")))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(dsd._won_text_unit("원화 금액 (단위 : 백만원)"), "백만원")
+        self.assertEqual(dsd._won_text_unit("직원수"), "")
+        self.assertEqual(dsd._won_text_unit("금액 천원"), "천원")
+        # A hand edit that changes only the text is caught by check.
+        stale = self._with_contents(xml.replace("(단위 : 원)", "(단위 : 백만원)"), "stale.dsd")
+        code, out, _ = run("check", str(stale), "--no-schema")
+        self.assertIn("T1R2C2: TU WON: text shows 백만원 (code 3) but AUNITVALUE is 1 (원)", out)
 
     def test_set_cell_fills_empty_and_self_closing_wrappers(self) -> None:
         a = self.out("a.dsd")

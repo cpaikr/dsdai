@@ -870,20 +870,63 @@ def _width_issues(doc: Doc, table: Table, where: str) -> List[Issue]:
 
 DATE_UNITS_RE = re.compile(r"(DT|DATE|PERIODFROM|PERIODTO)")
 
+# Observed: the currency-unit TU (AUNIT=WON) stores a code, not the
+# multiplier, so "1000" for 천원 is wrong even though it looks plausible.
+CODED_UNITS: Dict[str, Dict[str, str]] = {"WON": {"1": "원", "2": "천원", "3": "백만원"}}
+# A whole unit token: 원 inside a word (직원, 원화) is not a unit.
+WON_TEXT_RE = re.compile(r"(?<![가-힣])(?:백만|천|만)?원(?![가-힣])")
+
+
+def _won_text_unit(text: str) -> str:
+    """The currency unit the text names, preferring the one after a 단위 label."""
+    # Match on the original spacing: removing it would glue words together
+    # (금액 천원 -> 금액천원) and defeat the word-boundary rule.
+    label = text.find("단위")
+    for scope in ([text[label:]] if label >= 0 else []) + [text]:
+        m = WON_TEXT_RE.search(scope)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def _unit_value_conflict(aunit: str, text: str, value: str) -> Optional[str]:
+    """Why `value` cannot be the AUNITVALUE of a TU cell showing `text`, or None.
+
+    Only verified unit kinds are judged: dates (YYYYMMDD) and CODED_UNITS.
+    Text the rules cannot read (no date, an unobserved currency unit) is not
+    compared, but an unobserved code for a coded kind is always reported.
+    """
+    if not value:
+        return None
+    if DATE_UNITS_RE.search(aunit) and re.fullmatch(r"\d{8}", value):
+        shown = _date_digits(text)
+        if shown and shown != value:
+            return f"text shows date {shown} but AUNITVALUE is {value}"
+        return None
+    codes = CODED_UNITS.get(aunit)
+    if codes is None:
+        return None
+    known = ", ".join(f"{code}={name}" for code, name in codes.items())
+    if value not in codes:
+        return f"AUNIT={aunit} takes a code ({known}), not {value!r}"
+    shown = _won_text_unit(text)
+    if shown in codes.values() and shown != codes[value]:
+        code = next(c for c, name in codes.items() if name == shown)
+        return f"text shows {shown} (code {code}) but AUNITVALUE is {value} ({codes[value]})"
+    return None
+
 
 def _unit_issues(doc: Doc, table: Table, cell: Cell) -> List[Issue]:
+    """Warn when a TU cell's AUNITVALUE disagrees with its text (see _unit_value_conflict)."""
     node = cell.node
     if node.tag != "TU":
         return []
-    value = node.attrs.get("AUNITVALUE", "")
     unit = node.attrs.get("AUNIT", "")
-    if not value or not DATE_UNITS_RE.search(unit) or not re.fullmatch(r"\d{8}", value):
-        return []
-    shown = _date_digits(node_text(node))
-    if not shown or shown == value:
+    conflict = _unit_value_conflict(unit, node_text(node), node.attrs.get("AUNITVALUE", ""))
+    if conflict is None:
         return []
     where = f"T{table.index}R{cell.row}C{cell.col}"
-    return [Issue("warning", "unit-value", f"{where}: TU {unit} text shows {shown} but AUNITVALUE={value}")]
+    return [Issue("warning", "unit-value", f"{where}: TU {unit}: {conflict}")]
 
 
 PERIOD_UNIT_RE = re.compile(r"(PERIODFROM|PERIODTO)2?")
@@ -1006,6 +1049,7 @@ def op_set_cell(
     unit_value: Optional[str] = None,
     flatten: bool = False,
 ) -> Tuple[bytes, str]:
+    """Replace one cell's text, keeping its wrapper; refuse ambiguous or unit-inconsistent edits."""
     doc = Doc(data)
     table = doc.table(table_no)
     # Coordinates come from the whole table's structure, so check all of it.
@@ -1028,9 +1072,9 @@ def op_set_cell(
     if unit_value is not None:
         if node.tag != "TU":
             raise DsdError(f"--unit-value applies only to TU cells; {where} is {node.tag}")
-        shown = _date_digits(text)
-        if DATE_UNITS_RE.search(node.attrs.get("AUNIT", "")) and re.fullmatch(r"\d{8}", unit_value) and shown and shown != unit_value:
-            raise DsdError(f"{where}: text shows date {shown} but --unit-value is {unit_value}; make them agree")
+        conflict = _unit_value_conflict(node.attrs.get("AUNIT", ""), text, unit_value)
+        if conflict is not None:
+            raise DsdError(f"{where}: {conflict}; pass a --unit-value that agrees with --text")
     leaf = _leaf_for_text(node)
     if leaf is None:
         if not flatten:
@@ -2182,7 +2226,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--row", type=int, required=True)
     s.add_argument("--col", type=int, required=True)
     s.add_argument("--text", required=True, help="new text; newlines become DART line breaks")
-    s.add_argument("--unit-value", help="new AUNITVALUE for TU cells that carry one (e.g. 20251231)")
+    s.add_argument("--unit-value", help="new AUNITVALUE for TU cells that carry one (dates as 20251231; WON units as codes 1=원, 2=천원, 3=백만원)")
     s.add_argument("--flatten", action="store_true", help="replace mixed/multi-paragraph content with plain text")
     s.set_defaults(func=cmd_set_cell)
 

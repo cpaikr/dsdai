@@ -107,7 +107,8 @@ that, and both end in the same verification:
    - `set-cell` replaces one cell's text, keeping its `P`/`SPAN` wrapper and
      attributes. Newlines become `&cr;`. A `TU` cell with an `AUNITVALUE`
      requires `--unit-value` in the matching machine form (dates
-     `YYYYMMDD`); a date that disagrees with the text is refused. Cells with
+     `YYYYMMDD`; currency units as codes, see the format reference); a value
+     that disagrees with the text is refused. Cells with
      mixed or multi-paragraph content are refused; hand-edit them, or use
      `--flatten` only when losing that formatting is acceptable. A position
      covered by another cell's `ROWSPAN`/`COLSPAN` is refused; the error
@@ -154,7 +155,7 @@ would add a structural error or turn CRLF line endings into LF.
 
 1. Run `check OUT --against ORIGINAL`. It checks structure, image and
    `meta.xml` consistency, TOC numbering, table grids, size conventions,
-   `TU` date values and repeated period copies, and line endings. It also
+   `TU` date and currency-unit values, repeated period copies, and line endings. It also
    validates against the DART schema when `lxml` and a schema directory
    (`--schema-dir`, `DART_SCHEMA_DIR`, or `C:\DART\Resource\Dtd`) are
    available, and otherwise reports `schema-skipped`.
