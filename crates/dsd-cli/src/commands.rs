@@ -211,7 +211,11 @@ fn check(file: &Path, against: Option<&Path>, schema_dir: Option<&Path>, no_sche
     {
         issues.extend(dsd::schema::check(doc, schema_dir)?);
     }
-    if let Some(original) = against {
+    // A document that did not parse already has its structural errors; there
+    // is nothing to compare, and the issues must still reach the result.
+    if let Some(original) = against
+        && doc.is_some()
+    {
         issues.extend(compare_archives(&read_archive(original)?, &arc)?);
     }
     let count = |level: Level| issues.iter().filter(|i| i.level == level).count();

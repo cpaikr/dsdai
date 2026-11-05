@@ -936,7 +936,8 @@ fn rejects_corrupt_archives() {
     std::fs::write(w.path("x.dsd"), b"not a zip").unwrap();
     dsd(["inspect", &s(&w.path("x.dsd"))]).fails("invalid_archive");
     let mut bytes = support::fixture_bytes();
-    bytes[40] ^= 0xff; // inside the first member's compressed data
+    // Past the 30-byte local header and the 12-byte name: the compressed data.
+    bytes[30 + 12 + 5] ^= 0xff;
     std::fs::write(w.path("y.dsd"), &bytes).unwrap();
     dsd(["inspect", &s(&w.path("y.dsd"))]).fails("invalid_archive");
 }
@@ -991,4 +992,45 @@ fn find_stops_at_the_limit_like_the_helper() {
     let r = dsd(["find", &s(&w.src()), "000", "--limit", "2"]).ok();
     assert_eq!(r["matches"].as_array().unwrap().len(), 2);
     assert_eq!(r["limited"], true);
+}
+
+#[test]
+fn oversized_declared_grids_are_reported_not_built() {
+    let w = Work::new("biggrid");
+    let cols = "<COL WIDTH=\"1\"></COL>".repeat(2000);
+    let rows = "<TR></TR>".repeat(2000);
+    let table = format!("<TABLE><COLGROUP>{cols}</COLGROUP><TBODY>{rows}</TBODY></TABLE>");
+    let v = w.variant("big.dsd", &replace_once(&w.contents(), "<P>1. 일반사항</P>", &table));
+    let run = dsd(["check", &s(&v), "--no-schema"]);
+    assert!(run.json()["result"]["issues"].to_string().contains("grid limit"));
+    let issues = run.json()["result"]["issues"].as_array().unwrap().len();
+    assert!(issues < 50, "{issues} issues");
+    dsd(["table", &s(&v), "4"]).fails("invalid_argument");
+    // Many malformed rows report a bounded problem list.
+    let ragged = format!(
+        "<TABLE><COLGROUP>{}</COLGROUP><TBODY>{}</TBODY></TABLE>",
+        "<COL WIDTH=\"1\"></COL>".repeat(3),
+        "<TR></TR>".repeat(500)
+    );
+    let v = w.variant("ragged.dsd", &replace_once(&w.contents(), "<P>1. 일반사항</P>", &ragged));
+    let run = dsd(["check", &s(&v), "--no-schema"]);
+    let text = run.json()["result"]["issues"].to_string();
+    assert!(text.contains("more grid problem(s)"), "{text}");
+}
+
+#[test]
+fn check_against_keeps_issues_when_the_edit_does_not_parse() {
+    let w = Work::new("against-broken");
+    let broken = w.variant("broken.dsd", &w.contents().replacen("</DOCUMENT>", "", 1));
+    let run = dsd(["check", &s(&broken), "--against", &s(&w.src()), "--no-schema"]);
+    let v = run.json();
+    assert_eq!(v["error"]["code"], "check_failed");
+    assert!(v["result"]["issues"].to_string().contains("contents-xml"));
+}
+
+#[test]
+fn malformed_xml_declarations_are_refused() {
+    let w = Work::new("decl");
+    let v = w.variant("decl.dsd", &w.contents().replacen("<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<?xml?>", 1));
+    assert!(dsd(["check", &s(&v), "--no-schema"]).stdout.contains("contents-xml"));
 }

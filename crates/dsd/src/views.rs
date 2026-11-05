@@ -515,6 +515,10 @@ pub fn leaf_for_text(doc: &Doc, cell: NodeId) -> Option<NodeId> {
 
 pub fn table_view(doc: &Doc, index: usize, spans: bool) -> Result<TableView> {
     let table = doc.table(index)?;
+    if table.oversized {
+        let (rows, cols) = (table.rows.len(), table.ncols());
+        return Err(Error::invalid(format!("T{index} is too large to map ({rows} rows x {cols} columns)")));
+    }
     let tree = &doc.tree;
     let n = tree.node(table.node);
     let mut rows = Vec::new();

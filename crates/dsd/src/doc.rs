@@ -98,6 +98,8 @@ pub struct Table {
     pub grid: Vec<Vec<Option<usize>>>,
     pub cells: Vec<Cell>,
     pub issues: Vec<String>,
+    /// The grid exceeded `MAX_GRID_CELLS` and was not built.
+    pub oversized: bool,
 }
 
 impl Table {
@@ -208,6 +210,10 @@ impl Doc {
 
 /// Bound on a grid width inferred from COLSPAN values when no COLGROUP exists.
 const MAX_INFERRED_COLS: usize = 4096;
+/// Bound on rows x columns of one table's grid; larger tables are reported, not mapped.
+pub const MAX_GRID_CELLS: usize = 1 << 20;
+/// Grid problems reported per table before the rest are counted.
+const MAX_GRID_ISSUES: usize = 100;
 
 pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
     let mut cols: Vec<i64> = Vec::new();
@@ -247,8 +253,15 @@ pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
     }
     let ncols = cols.len();
     let nrows = rows.len();
+    if nrows.saturating_mul(ncols) > MAX_GRID_CELLS {
+        issues.push(format!(
+            "{nrows} rows x {ncols} columns exceeds the {MAX_GRID_CELLS}-cell grid limit; cells are not mapped"
+        ));
+        return Table { index, node, cols, rows, grid: Vec::new(), cells: Vec::new(), issues, oversized: true };
+    }
     let mut grid: Vec<Vec<Option<usize>>> = vec![vec![None; ncols.max(1)]; nrows];
     let mut cells: Vec<Cell> = Vec::new();
+    let mut problems = Problems { issues, extra: 0 };
     for (ri, &row) in rows.iter().enumerate() {
         let mut ci = 0;
         for &cnode in tree.children(row) {
@@ -262,16 +275,16 @@ pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
             let cell_index = cells.len();
             cells.push(Cell { node: cnode, row: ri + 1, col: ci + 1, rowspan: rs, colspan: cs });
             if ci.saturating_add(cs) > ncols {
-                issues.push(format!("R{}C{}: cell spans past the {ncols} declared columns", ri + 1, ci + 1));
+                problems.push(|| format!("R{}C{}: cell spans past the {ncols} declared columns", ri + 1, ci + 1));
             }
             if ri.saturating_add(rs) > nrows {
-                issues.push(format!("R{}C{}: ROWSPAN {rs} runs past the last row", ri + 1, ci + 1));
+                problems.push(|| format!("R{}C{}: ROWSPAN {rs} runs past the last row", ri + 1, ci + 1));
             }
             // Only grid positions inside the table exist; a huge span costs no more than the grid.
             for a in 0..rs.min(nrows - ri) {
                 for b in 0..cs.min(ncols.saturating_sub(ci)) {
                     if grid[ri + a][ci + b].is_some() {
-                        issues.push(format!("R{}C{}: overlapping cells", ri + a + 1, ci + b + 1));
+                        problems.push(|| format!("R{}C{}: overlapping cells", ri + a + 1, ci + b + 1));
                     }
                     grid[ri + a][ci + b] = Some(cell_index);
                 }
@@ -280,10 +293,37 @@ pub fn build_table(tree: &Tree, index: usize, node: NodeId) -> Table {
         }
     }
     for (ri, row) in grid.iter().enumerate() {
-        let missing: Vec<String> = (0..ncols).filter(|&ci| row[ci].is_none()).map(|ci| (ci + 1).to_string()).collect();
-        if !missing.is_empty() {
-            issues.push(format!("R{}: no cell covers column(s) {}", ri + 1, missing.join(",")));
+        if row.iter().take(ncols).any(Option::is_none) {
+            problems.push(|| {
+                let missing: Vec<String> =
+                    (0..ncols).filter(|&ci| row[ci].is_none()).take(50).map(|ci| (ci + 1).to_string()).collect();
+                format!("R{}: no cell covers column(s) {}", ri + 1, missing.join(","))
+            });
         }
     }
-    Table { index, node, cols, rows, grid, cells, issues }
+    let issues = problems.finish();
+    Table { index, node, cols, rows, grid, cells, issues, oversized: false }
+}
+
+/// Grid problems, bounded: a malformed table reports its first problems and a count.
+struct Problems {
+    issues: Vec<String>,
+    extra: usize,
+}
+
+impl Problems {
+    fn push(&mut self, message: impl FnOnce() -> String) {
+        if self.issues.len() < MAX_GRID_ISSUES {
+            self.issues.push(message());
+        } else {
+            self.extra += 1;
+        }
+    }
+
+    fn finish(mut self) -> Vec<String> {
+        if self.extra > 0 {
+            self.issues.push(format!("... {} more grid problem(s)", self.extra));
+        }
+        self.issues
+    }
 }
