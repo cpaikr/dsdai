@@ -98,12 +98,15 @@ def private_smoke() -> None:
         print("skip private corpus (fixtures/private/ absent)")
         return
     tool = SKILLS / "dart-dsd" / "scripts" / "dsd.py"
+    sys.path.insert(0, str(SKILLS / "dart-dsd" / "evals"))
+    import test_dsd  # noqa: E402  (shares the text-completeness helpers)
+
     with tempfile.TemporaryDirectory() as tmp:
         for i, src in enumerate(files, 1):
-            work, out, md = Path(tmp) / f"w{i}", Path(tmp) / f"o{i}.dsd", Path(tmp) / f"m{i}.md"
+            work, out, view = Path(tmp) / f"w{i}", Path(tmp) / f"o{i}.dsd", Path(tmp) / f"v{i}.txt"
             steps = [
                 ["check", str(src), "--json"],
-                ["read", str(src), "-o", str(md)],
+                ["read", str(src), "-o", str(view)],
                 ["outline", str(src)],
                 ["extract", str(src), str(work)],
                 ["pack", str(work), str(src), "-o", str(out)],
@@ -120,10 +123,12 @@ def private_smoke() -> None:
                         if issue["code"].startswith("unverified-"):
                             print(f"note private sample #{i}: {issue['code']} {issue['message'].split(':')[0]}")
             else:
-                if out.read_bytes() != src.read_bytes():
+                if test_dsd.visible_text(src) != test_dsd.source_text(src):
+                    fail(f"private sample #{i}: read omits or alters text outside tables")
+                elif out.read_bytes() != src.read_bytes():
                     fail(f"private sample #{i}: extract/pack round trip is not byte-identical")
                 else:
-                    print(f"ok   private sample #{i}: check, read, outline, byte-identical round trip")
+                    print(f"ok   private sample #{i}: check, complete read, outline, byte-identical round trip")
 
 
 def main() -> int:

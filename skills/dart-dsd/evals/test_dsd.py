@@ -35,6 +35,30 @@ def contents_of(path: Path) -> str:
     return zipfile.ZipFile(path).read("contents.xml").decode("utf-8")
 
 
+def view_rows(path: Path, scaffold: bool = False) -> list:
+    """(line, path, rest) for each line of `read`'s text view."""
+    view = dsd.TextView(dsd.Doc(dsd.read_archive(path).contents), scaffold=scaffold)
+    view.render()
+    return view.rows
+
+
+def visible_text(path: Path) -> str:
+    """All document text the view shows, without whitespace or inline markers."""
+    shown = "".join(json.loads(rest) for _, _, rest in view_rows(path) if rest.startswith('"'))
+    return re.sub(r"[ \t\r\n]|⟦[^⟧]*⟧", "", shown)
+
+
+def source_text(path: Path) -> str:
+    """All text in contents.xml outside tables and editor scaffolding, without whitespace."""
+    def walk(node: dsd.Node) -> str:
+        if node.tag in dsd.SCAFFOLD_TAGS or node.tag == "TABLE":
+            return ""
+        return "".join(i if isinstance(i, str) else walk(i) for i in node.items)
+
+    text = walk(dsd.Doc(dsd.read_archive(path).contents).root)
+    return re.sub(r"[ \t\r\n]", "", text.replace(dsd.CR_TOKEN, dsd.LINE_BREAK_MARK))
+
+
 class DsdTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -71,21 +95,95 @@ class ReadTests(DsdTestCase):
         self.assertFalse(image["utf8_flag"])
         self.assertEqual(report["document"]["line_endings"], "CRLF")
 
-    def test_markdown_rendering(self) -> None:
-        md = self.dir / "sample.md"
-        code, _, err = run("read", str(self.src), "-o", str(md))
+    def test_text_view(self) -> None:
+        code, out, err = run("read", str(self.src))
         self.assertEqual(code, 0, err)
-        text = md.read_text(encoding="utf-8")
-        self.assertIn("# 감 사 보 고 서", text)
-        self.assertIn("## 독립된 감사인의 감사보고서", text)
-        self.assertIn("### 재무상태표", text)
-        self.assertIn("재무제표를 감사하였습니다.  \n둘째 줄입니다.", text)  # &cr; -> line break
-        self.assertIn('<th rowspan="2">주주명</th><th colspan="2">당기말</th>', text)
-        self.assertIn("| 현금및현금성자산 | 1,000,000 | 700,000 |", text)
-        self.assertIn("첫 문단<br>둘째 문단", text)
-        self.assertNotIn("◆click◆", text)  # editor scaffolding is not content
-        self.assertIn("(<sample.assets/image-001.jpg>)", text)
-        self.assertEqual((self.dir / "sample.assets" / "image-001.jpg").read_bytes(), make_fixture.IMAGE_BYTES)
+        self.assertIn('# schema: "dart4.xsd"\n', out)
+        self.assertNotIn("# unverified", out)
+        self.assertRegex(out, r"\nL25 +COVER/COVER-TITLE +\"감   사   보   고   서\"\n")  # spacing kept exactly
+        self.assertNotIn("홍길동", out)  # cell text lives in `table`, not in the view
+        self.assertNotIn("◆click◆", out)  # editor scaffolding is hidden by default
+        rows = view_rows(self.src)
+        for row in (
+            ("SECTION-1/P", r'"우리는 가나다테크 주식회사(이하 \"회사\")의 재무제표를 감사하였습니다.⏎둘째 줄입니다."'),
+            ("COVER/P", '"⏎⏎"'),
+            ("SECTION-2/TITLE", '"재무상태표"'),  # paths start at the innermost section
+            ("SECTION-2/TABLE", "T4 rows=4 cols=3 -> table 4"),
+            ("SECTION-2/IMAGE/IMG", '"대표이사 확인서.jpg"'),
+            ("COVER/PGBRK", ""),
+            ("DOCUMENT-HEADER/SUMMARY/EXTRACTION[ACODE=FIN_STAT]", '"100"'),
+        ):
+            self.assertIn(row, [r[1:] for r in rows])
+        line = next(r[0] for r in rows if r[1] == "SECTION-2/TITLE")
+        self.assertIn('<TITLE ATOC="Y" ATOCID="4">', contents_of(self.src).splitlines()[line - 1])
+
+        shown = [r[1:] for r in view_rows(self.src, scaffold=True)]
+        self.assertIn(("INSERTION/COMMENT", '"◆click◆ 예시: 정정 안내 문단 삽입"'), shown)
+        self.assertIn(("INSERTION/LIBRARY/FILENAME", '"01_예시 감사인 보고서"'), shown)
+        code, out, _ = run("read", str(self.src), "--scaffold", "--no-header")
+        self.assertTrue(out.startswith("L7 "), out[:40])
+        self.assertIn("◆click◆", out)
+
+        txt = self.dir / "sample.txt"
+        code, _, err = run("read", str(self.src), "-o", str(txt))
+        self.assertEqual(code, 0, err)
+        self.assertIn("# legend:", txt.read_text(encoding="utf-8"))
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["sample.dsd", "sample.txt"])  # no image assets
+        code, _, err = run("read", str(self.src), "-o", str(txt))
+        self.assertEqual(code, 1)
+        self.assertIn("already exists", err)
+
+    def test_text_view_shows_elements_it_has_no_rule_for(self) -> None:
+        xml = contents_of(self.src)
+        for old, new in (
+            ("<P>1. 일반사항</P>", '<NEWTHING AFLAG="Y" ANOTE="a b"><P>1. 일반사항</P>설명</NEWTHING>'),
+            ('<P USERMARK="B">감사의견</P>', '<P USERMARK="B">감사<EMPHASIS AKIND="1">의견</EMPHASIS></P>'),
+            ("<WARNING>", "<CAUTION>주의 문구</CAUTION><WARNING>"),
+            ('ATOCID="4">재무상태표</TITLE>', 'ATOCID="4">재무상태표</TITLE>떠도는 글'),
+            (">Ⅰ.유동자산</TD>", "><EMPHASIS>Ⅰ.유동자산</EMPHASIS></TD>"),
+        ):
+            self.assertEqual(xml.count(old), 1, old)
+            xml = xml.replace(old, new)
+        variant = self._with_contents(xml, "unknown.dsd")
+        rows = [r[1:] for r in view_rows(variant)]
+        note = 'SECTION-2/NEWTHING[AFLAG=Y ANOTE="a b"]'
+        at = rows.index((note, ""))
+        self.assertEqual(rows[at + 1:at + 3], [(note + "/P", '"1. 일반사항"'), (note + "/#text", '"설명"')])
+        self.assertIn(("SECTION-1/P", '"감사⟦EMPHASIS[AKIND=1]⟧의견⟦/EMPHASIS⟧"'), rows)
+        self.assertIn(("SECTION-1/CAUTION", '"주의 문구"'), rows)
+        self.assertIn(("SECTION-2/#text", '"떠도는 글"'), rows)
+        self.assertIn(("SECTION-2/TABLE", "T3 rows=6 cols=3 -> table 3 [contains unverified EMPHASIS]"), rows)
+        code, out, _ = run("read", str(variant))
+        self.assertIn('# unverified: ["CAUTION", "EMPHASIS", "NEWTHING"]', out)
+        self.assertEqual(visible_text(variant), source_text(variant))
+
+    def test_text_view_keeps_all_text_outside_tables(self) -> None:
+        self.assertEqual(visible_text(self.src), source_text(self.src))
+
+    def test_text_view_edge_layouts(self) -> None:
+        xml = contents_of(self.src)
+        for old, new in (
+            # Stray text on its own CRLF line, and stray text that is only U+3000.
+            ('ATOCID="4">재무상태표</TITLE>\r\n', 'ATOCID="4">재무상태표</TITLE>\r\n\r\n떠도는 글\r\n'),
+            ('ATOCID="3">(첨부)재 무 제 표</TITLE>', 'ATOCID="3">(첨부)재 무 제 표</TITLE>\u3000\u3000'),
+            # A table inside a paragraph keeps its T# stub; scaffolding does not split a generic element.
+            ("<P>1. 일반사항</P>", "<P>1. 일반사항<TABLE><TBODY><TR><TD>셀</TD></TR></TBODY></TABLE>끝</P>"
+                                 "<NEWTHING>앞<COMMENT>안내</COMMENT>뒤</NEWTHING>"),
+        ):
+            self.assertEqual(xml.count(old), 1, old)
+            xml = xml.replace(old, new)
+        variant = self._with_contents(xml, "edges.dsd")
+        rows = view_rows(variant)
+        stray = next(r for r in rows if r[2] == '"떠도는 글"')
+        self.assertEqual(contents_of(variant).split("\r\n")[stray[0] - 1], "떠도는 글")
+        self.assertIn(("SECTION-1/#text", '"\u3000\u3000"'), [r[1:] for r in rows])
+        self.assertIn(("SECTION-2/P", '"1. 일반사항⟦T4 -> table 4⟧끝"'), [r[1:] for r in rows])
+        self.assertIn(("SECTION-2/NEWTHING", '"앞뒤"'), [r[1:] for r in rows])
+        self.assertEqual(visible_text(variant), source_text(variant))
+
+    def test_text_view_rules_cover_only_verified_elements(self) -> None:
+        ruled = dsd.TEXT_VIEW_TAGS | dsd.CONTAINER_TAGS | dsd.INLINE_TAGS | {"TABLE", "PGBRK"}
+        self.assertLessEqual(ruled, dsd.VERIFIED_TAGS)
 
     def test_find_is_whitespace_insensitive(self) -> None:
         code, out, _ = run("find", str(self.src), "자산총계")
@@ -395,8 +493,8 @@ class UnverifiedContentTests(DsdTestCase):
         self.assertIn("<NOTE> x1", out)
         code, out, _ = run("read", str(variant))
         self.assertEqual(code, 0)
-        self.assertIn('unverified: ["NOTE"]', out)
-        self.assertRegex(out, r"<!-- dsd:unverified NOTE line=\d+: rendering not verified -->\n\n1\. 일반사항")
+        self.assertIn('# unverified: ["NOTE"]', out)
+        self.assertRegex(out, r"\nL\d+ +SECTION-2/NOTE\nL\d+ +SECTION-2/NOTE/P +\"1\. 일반사항\"\n")
         code, out, _ = run("find", str(variant), "일반사항")
         self.assertIn("[unverified NOTE]", out)
         code, out, _ = run("outline", str(variant), "--all")
@@ -484,7 +582,7 @@ class UnverifiedContentTests(DsdTestCase):
         code, out, _ = run("outline", str(deep))
         self.assertRegex(out, r"SECTION-4 재무상태표\r?\n")
         code, out, _ = run("read", str(deep))
-        self.assertIn("##### 재무상태표", out)
+        self.assertRegex(out, r"\nL\d+ +SECTION-4/TITLE +\"재무상태표\"\n")
         self.assertNotIn("unverified", out)
         code, _, err = run("set-cell", str(deep), "--table", "3", "--row", "4", "--col", "2",
                            "--text", "1,100,000", "-o", str(self.out("a.dsd")))
@@ -516,7 +614,7 @@ class UnverifiedContentTests(DsdTestCase):
         code, out, _ = run("check", str(variant), "--no-schema")
         self.assertIn("unverified-schema", out)
         code, out, _ = run("read", str(variant))
-        self.assertIn('unverified: ["schema dart9.xsd"]', out)
+        self.assertIn('# unverified: ["schema dart9.xsd"]', out)
         code, _, err = run("set-cell", str(variant), "--table", "3", "--row", "4", "--col", "2",
                            "--text", "1", "-o", str(self.out()))
         self.assertEqual(code, 1)

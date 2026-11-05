@@ -36,26 +36,36 @@ copies where the user asked, or beside the source.
 2. `outline FILE` lists sections, filled insertions, images, and tables as
    `T1`, `T2`, … with `contents.xml` line numbers.
 3. Choose the view the task needs:
-   - `read FILE -o OUT.md` renders Markdown: headings follow `SECTION-n`
-     levels, span tables become HTML, `&cr;` becomes a line break, images go
-     to `OUT.assets/`, and each table is tagged `<!-- dsd:table T# … -->`.
+   - `read FILE` lists every text block in order, one per line: the
+     `contents.xml` line, the element path from the innermost section
+     (`SECTION-2/P`), and the exact text as a JSON string with `⏎` for DART's
+     `&cr;` line break. Tables appear as `T#` stubs; images by member name.
+     An element inside text other than `SPAN`/`A` stays visible as
+     `⟦TAG⟧…⟦/TAG⟧`. `COMMENT`, `LIBRARYLIST`, and `FILENAME` scaffolding is
+     hidden unless `--scaffold`; `WARNING` lines are shown. Use `-o FILE` for
+     long documents.
    - `table FILE N …` prints exact cell text with `R#`/`C#` coordinates,
      spans, row locks, and `ACODE`/`AUNIT` metadata.
    - `find FILE TEXT` locates text across cells and paragraphs, ignoring
      whitespace differences unless `--exact`.
 
-Quote figures from `table` output when precision matters; Markdown collapses
-spacing. Editor guidance (`◆click◆` comments, `LIBRARYLIST`, `WARNING`) and
-unfilled `INSERTION` slots are not document content.
+Both `read` and `table` keep text exactly as stored, so quote figures and
+titles from them. When the user wants Markdown or another formatted
+rendering, write it yourself from that output: section levels come from
+`SECTION-n`, cells from `table`, and images from `extract`. Editor guidance
+(`◆click◆` comments, `LIBRARYLIST`, `WARNING`) and unfilled `INSERTION` slots
+are not document content.
 
 The helper's rules were verified only on elements and schemas seen in real
 DART Editor output, plus a few deeper-level elements (`SECTION-4` to
 `SECTION-7`, `TFOOT`) whose schema definition matches a seen one; the
 [format reference](references/format.md) lists both. The helper shows
 anything else as found but does not interpret it: `inspect`/`check`
-report `unverified-element` or `unverified-schema`, Markdown carries `<!-- dsd:unverified … -->` markers and an `unverified`
-front-matter field, `find` tags hits `[unverified …]`, and `table` warns that
-coordinates may not match DART Editor. When such content matters to the
+report `unverified-element` or `unverified-schema`; `read` lists them in its
+`# unverified` header and gives each such element its own line with its
+attributes (`NOTE[ACLASS=…]`), or a `⟦TAG[…]⟧` marker when it sits inside text;
+`find` tags hits `[unverified …]`; and `table` warns that coordinates may not
+match DART Editor. When such content matters to the
 task, read the raw XML at the reported line (`extract`) and the
 [format reference](references/format.md) before relying on its meaning, and
 tell the user which parts were unverified.

@@ -4,8 +4,8 @@
     {
       "id": 1,
       "prompt": "fixtures/public/sample.dsd 내용을 읽기 좋은 마크다운으로 만들어 줘.",
-      "hard_because": "Generic unzip shows mojibake image names and raw XML; &cr; tokens, editor comments, and span tables need DSD-specific handling.",
-      "expected_output": "Runs inspect/outline, then read -o beside the source (sample.md plus sample.assets/). The Markdown keeps section headings, renders the rowspan/colspan shareholder table as HTML, turns &cr; into line breaks, omits ◆click◆ scaffolding, and links the image. Does not upload or paste the full document elsewhere."
+      "hard_because": "Generic unzip shows mojibake image names and raw XML; &cr; tokens, editor comments, and span tables need DSD-specific handling, and the helper deliberately emits no Markdown.",
+      "expected_output": "Runs inspect/outline, then read and table for each T#, and writes sample.md beside the source itself. Headings follow SECTION-n levels, the rowspan/colspan shareholder table keeps its spans (for example as HTML), &cr; becomes a line break, figures and spacing are copied from read/table output, ◆click◆ scaffolding is omitted, and the image is written out from extract if it is linked. Does not upload or paste the full document elsewhere."
     },
     {
       "id": 2,

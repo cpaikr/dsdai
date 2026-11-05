@@ -69,8 +69,8 @@ DOCUMENT  (xsi:noNamespaceSchemaLocation="dart4.xsd" or "dart3.xsd")
 - Section depth is the number in `SECTION-n`, not XML depth: a `SECTION-1`
   can sit inside a `LIBRARY` that is itself inside a `SECTION-2`.
 - `COMMENT`, `LIBRARYLIST`, `FILENAME`, `WARNING`, and `APPENDIX` comments are
-  editor guidance (`◆click◆ …`) and are not printed. An `INSERTION` without a
-  `LIBRARY` is an unused optional slot.
+  editor guidance (`◆click◆ …`) that DART does not print. An `INSERTION`
+  without a `LIBRARY` is an unused optional slot.
 - `DOCUMENT-HEADER/SUMMARY/EXTRACTION` values (`ACODE` such as `FIN_STAT`,
   `TOT_ASSETS`) feed DART's data extraction. Change them only on request.
 
