@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
-VERSION = "1.1.0"
+VERSION = "2.0.0"
 
 CONTENTS = "contents.xml"
 META = "meta.xml"
@@ -579,9 +579,13 @@ class Block:
     line: int
     attrs: Tuple[Tuple[str, str], ...] = ()
     unverified: Tuple[str, ...] = ()  # unverified tags in or around this block
+    group: str = ""  # cells of one table row share a group ("T3R4"); a text block is its own group
 
     def attr_text(self) -> str:
         return " ".join(f'{k}="{v}"' for k, v in self.attrs)
+
+    def key(self) -> Tuple[str, str, Tuple[Tuple[str, str], ...]]:
+        return self.tag, self.text, self.attrs
 
 
 def iter_blocks(doc: Doc) -> Iterator[Block]:
@@ -603,6 +607,7 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                         doc.line(cell.node.start),
                         tuple(sorted(cell.node.attrs.items())),
                         around,
+                        f"T{table.index}R{cell.row}",
                     )
             elif child.tag in BLOCK_TEXT_TAGS:
                 yield Block(
@@ -612,6 +617,7 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                     doc.line(child.start),
                     tuple(sorted(child.attrs.items())),
                     tuple(sorted(set(outer) | set(unverified_tags(child)))),
+                    f"@{child.start}",  # byte offset: unique even when blocks share a line
                 )
             else:
                 inner = outer if child.tag in VERIFIED_TAGS else tuple(sorted(set(outer) | {child.tag}))
@@ -812,6 +818,7 @@ def check_archive(arc: Archive) -> Tuple[List[Issue], Optional[Doc]]:
         issues.extend(_width_issues(doc, table, where))
         for cell in table.cells:
             issues.extend(_unit_issues(doc, table, cell))
+    issues.extend(_period_issues(doc))
     return issues, doc
 
 
@@ -877,6 +884,33 @@ def _unit_issues(doc: Doc, table: Table, cell: Cell) -> List[Issue]:
         return []
     where = f"T{table.index}R{cell.row}C{cell.col}"
     return [Issue("warning", "unit-value", f"{where}: TU {unit} text shows {shown} but AUNITVALUE={value}")]
+
+
+PERIOD_UNIT_RE = re.compile(r"(PERIODFROM|PERIODTO)2?")
+
+
+def _period_issues(doc: Doc) -> List[Issue]:
+    """Warn when TU cells for the same reporting-period bound disagree.
+
+    Observed: forms that repeat the period (cover and attached-statements
+    title) write the repeat as PERIODFROM2/PERIODTO2 with the same machine
+    date as PERIODFROM/PERIODTO, so a lone edit to one copy leaves the other
+    stale. Other unit kinds (e.g. SUB_PERIODFROM) are not compared.
+    """
+    bounds: Dict[str, List[Tuple[str, str]]] = {}
+    for table in doc.tables:
+        for cell in table.cells:
+            node = cell.node
+            m = PERIOD_UNIT_RE.fullmatch(node.attrs.get("AUNIT", ""))
+            if node.tag == "TU" and m and node.attrs.get("AUNITVALUE"):
+                loc = f"T{table.index}R{cell.row}C{cell.col}"
+                bounds.setdefault(m.group(1), []).append((loc, node.attrs["AUNITVALUE"]))
+    out: List[Issue] = []
+    for bound, cells in sorted(bounds.items()):
+        if len({value for _, value in cells}) > 1:
+            listing = ", ".join(f"{loc}={value}" for loc, value in cells)
+            out.append(Issue("warning", "period-mismatch", f"{bound}/{bound}2 TU cells disagree: {listing}"))
+    return out
 
 
 def schema_validate(contents: bytes, schema_dir: Path, schema_name: str) -> List[Issue]:
@@ -978,9 +1012,13 @@ def op_set_cell(
     _require_verified(doc, table.node, f"T{table_no}")
     cell = cell_at(table, row, col)
     node = cell.node
-    note = ""
     if (cell.row, cell.col) != (row, col):
-        note = f" (R{row}C{col} is covered by the spanning cell at R{cell.row}C{cell.col})"
+        # Writing the anchor instead would silently change a header or label
+        # the caller never addressed.
+        raise DsdError(
+            f"T{table_no} R{row}C{col} is covered by the spanning cell at R{cell.row}C{cell.col};"
+            f" address that cell (--row {cell.row} --col {cell.col}) if it is the one to change"
+        )
     where = f"T{table_no}R{cell.row}C{cell.col}"
     if node.tag == "TU" and node.attrs.get("AUNITVALUE") and unit_value is None:
         raise DsdError(
@@ -1015,7 +1053,7 @@ def op_set_cell(
             edits.append(_set_attr(data, node, "AUNITVALUE", unit_value))
         edits.append((leaf.open_end, leaf.close_start, new_inner))
     before = node_text(node)
-    return _replace_ranges(data, edits), f"{where} {node.tag}: {before!r} -> {text!r}{note}"
+    return _replace_ranges(data, edits), f"{where} {node.tag}: {before!r} -> {text!r}"
 
 
 def _date_digits(text: str) -> str:
@@ -1329,130 +1367,136 @@ def apply_ops(data: bytes, ops: Sequence[Dict[str, object]]) -> Tuple[bytes, Lis
 
 
 # --------------------------------------------------------------------------
-# Markdown rendering
+# Text view (`read`)
+#
+# One line per block: contents.xml line, element path, then either the exact
+# document text as a JSON string or, for tables, a stub pointing at `table`.
+# Rules exist only for verified elements in known positions; everything else
+# takes the generic rule, which shows more rather than less: the element gets
+# its own line with its attributes, and its children follow on further lines.
+
+LINE_BREAK_MARK = "⏎"  # shown for DART's &cr; line break
+INLINE_TAGS = frozenset({"SPAN", "A"})  # their text joins the enclosing block's text
+TEXT_VIEW_TAGS = frozenset({
+    "P", "TITLE", "COVER-TITLE", "IMG", "IMG-CAPTION", "WARNING",
+    "DOCUMENT-NAME", "FORMULA-VERSION", "COMPANY-NAME", "EXTRACTION",
+})
+# A region starts a fresh path, so paths stay short: SECTION-2/P rather than
+# BODY/INSERTION/LIBRARY/SECTION-1/SECTION-2/P. `outline` shows the nesting.
+REGION_TAGS = frozenset({"DOCUMENT-HEADER", "COVER", "TOC", "PART", "APPENDIX"} | {f"SECTION-{n}" for n in range(1, 8)})
+TRANSPARENT_TAGS = frozenset({"DOCUMENT", "BODY"})
+CONTAINER_TAGS = REGION_TAGS | TRANSPARENT_TAGS | {"SUMMARY", "INSERTION", "LIBRARY", "TABLE-GROUP", "IMAGE"}
+SHOWN_ATTRS = {"DOCUMENT-NAME": ("ACODE",), "EXTRACTION": ("ACODE",)}  # attributes that carry meaning
 
 
-def _md_inline(text: str) -> str:
-    # Underscores stay literal: GFM ignores intraword "_" and DART text uses it in names.
-    return re.sub(r"([\\`*\[\]<>])", r"\\\1", text)
+def _layout_free(text: str) -> str:
+    """Drop literal newlines, which are XML layout; DART stores breaks as &cr;."""
+    return text.replace("\r", "").replace("\n", "")
 
 
-def _html(text: str) -> str:
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def _attr_label(node: Node, names: Optional[Sequence[str]] = None) -> str:
+    items = [(k, v) for k, v in node.attrs.items() if names is None or k in names]
+    if not items:
+        return ""
+    plain = re.compile(r"[^\s\[\]\"=]+")
+    return "[" + " ".join(f"{k}={v if plain.fullmatch(v) else json.dumps(v, ensure_ascii=False)}" for k, v in items) + "]"
 
 
-class MarkdownRenderer:
-    def __init__(self, doc: Doc, image_links: Dict[str, str]):
+LAYOUT_SPACE = " \t\r\n"  # not U+3000 or NBSP, which DART uses as visible content
+LEADING_LAYOUT_RE = re.compile(rb"[ \t\r\n]*")
+
+
+def exact_text(node: Node, scaffold: bool = False, tables: Optional[Dict[Node, Table]] = None) -> str:
+    """A block's text without whitespace normalization.
+
+    &cr; becomes LINE_BREAK_MARK. SPAN/A text joins in place; any other child
+    element is kept visible as ⟦TAG[attrs]⟧…⟦/TAG⟧ rather than silently merged,
+    and a table as a ⟦T#⟧ stub so its cells keep their `table` coordinates.
+    """
+    parts: List[str] = []
+    for item in node.items:
+        if isinstance(item, str):
+            parts.append(_layout_free(item).replace(CR_TOKEN, LINE_BREAK_MARK))
+        elif item.tag in SCAFFOLD_TAGS and not scaffold:
+            continue
+        elif item.tag in INLINE_TAGS:
+            parts.append(exact_text(item, scaffold, tables))
+        elif tables is not None and item in tables:
+            parts.append(f"⟦T{tables[item].index} -> table {tables[item].index}⟧")
+        else:
+            parts.append(f"⟦{item.tag}{_attr_label(item)}⟧{exact_text(item, scaffold, tables)}⟦/{item.tag}⟧")
+    return "".join(parts)
+
+
+class TextView:
+    def __init__(self, doc: Doc, scaffold: bool = False):
         self.doc = doc
-        self.image_links = image_links
+        self.scaffold = scaffold
         self.table_by_node = {t.node: t for t in doc.tables}
-        self.out: List[str] = []
-
-    def emit(self, block: str) -> None:
-        if block.strip():
-            self.out.append(block.rstrip())
+        self.rows: List[Tuple[int, str, str]] = []  # (line, path, rest)
 
     def render(self) -> str:
-        body = next(self.doc.root.iter("BODY"), None)
-        self.walk(body if body is not None else self.doc.root, level=1)
-        return "\n\n".join(self.out) + "\n"
+        self.visit(self.doc.root, [], keep_path=False)
+        width = min(max((len(p) for _, p, _ in self.rows), default=0), 40)
+        lines = [f"L{line:<6} {path:<{width}} {rest}".rstrip() for line, path, rest in self.rows]
+        return "\n".join(lines) + ("\n" if lines else "")
 
-    def heading_level(self, node: Node) -> int:
-        for anc in node.ancestors():
-            if anc.tag == "PART":
-                return 1
-            m = re.fullmatch(r"SECTION-(\d+)", anc.tag)
-            if m:
-                return min(int(m.group(1)) + 1, 6)
-        return 2
+    def add(self, offset: int, path: List[str], rest: str) -> None:
+        self.rows.append((self.doc.line(offset), "/".join(path), rest))
 
-    def walk(self, node: Node, level: int) -> None:
+    def walk(self, node: Node, path: List[str], keep_path: bool) -> None:
+        pos = node.open_end
         for item in node.items:
             if isinstance(item, str):
-                text = item.replace("\r", "").replace("\n", "").replace(CR_TOKEN, "\n").strip()
-                if text:
-                    self.emit(_md_inline(text))
+                text = _layout_free(item)
+                if text.strip(LAYOUT_SPACE):
+                    # Expat folds CRLF into LF, so measure the layout in the raw bytes.
+                    line_pos = LEADING_LAYOUT_RE.match(self.doc.data, pos).end()  # type: ignore[union-attr]
+                    self.add(line_pos, path + ["#text"], _q(text.replace(CR_TOKEN, LINE_BREAK_MARK)))
                 continue
-            tag = item.tag
-            if tag in SCAFFOLD_TAGS or tag == "DOCUMENT-HEADER":
-                continue
-            # Leaves render their whole subtree; containers are walked, so they
-            # mark only themselves and their children mark the rest.
-            leaf = tag in ("TITLE", "COVER-TITLE", "P", "SUBTITLE", "TABLE", "IMAGE", "WARNING")
-            unseen = unverified_tags(item) if leaf else ([tag] if tag not in VERIFIED_TAGS else [])
+            self.visit(item, path, keep_path)
+            pos = item.end
+
+    def visit(self, node: Node, path: List[str], keep_path: bool) -> None:
+        tag = node.tag
+        if tag in SCAFFOLD_TAGS:
+            if self.scaffold:
+                self.add(node.start, path + [tag], _q(exact_text(node, True, self.table_by_node)))
+            return
+        known = tag in VERIFIED_TAGS
+        if known and tag == "TABLE":
+            table = self.table_by_node[node]
+            stub = f"T{table.index} rows={len(table.rows)} cols={table.ncols} -> table {table.index}"
+            unseen = unverified_tags(node)
             if unseen:
-                names = ",".join(unseen).replace("--", "- -")
-                self.emit(f"<!-- dsd:unverified {names} line={self.doc.line(item.start)}: rendering not verified -->")
-            if tag == "TITLE":
-                text = " ".join(node_text(item).split())
-                if item.parent is not None and (item.parent.tag in ("PART",) or item.parent.tag.startswith("SECTION-")):
-                    self.emit("#" * self.heading_level(item) + " " + _md_inline(text))
-                else:
-                    self.emit(f"**{_md_inline(text)}**")
-            elif tag == "COVER-TITLE":
-                self.emit("# " + _md_inline(" ".join(node_text(item).split())))
-            elif tag in ("P", "SUBTITLE"):
-                lines = [ln.strip() for ln in node_text(item).split("\n")]
-                self.emit("  \n".join(_md_inline(ln) for ln in lines if ln))
-            elif tag == "TABLE":
-                self.emit(self.table(self.table_by_node[item]))
-            elif tag == "IMAGE":
-                self.emit(self.image(item))
-            elif tag == "PGBRK":
-                self.emit("<!-- dsd:page-break -->")
-            elif tag == "WARNING":
-                text = " ".join(node_text(item).split())
-                self.emit(f"<!-- dsd:editor-warning {text.replace('--', '- -')} -->")
+                stub += f" [contains unverified {','.join(unseen)}]"
+            self.add(node.start, path + [tag], stub)
+        elif known and tag == "PGBRK" and not exact_text(node, self.scaffold).strip(LAYOUT_SPACE) and not node.children:
+            self.add(node.start, path + [tag], "")
+        elif known and tag in TEXT_VIEW_TAGS:
+            self.add(node.start, path + [tag + _attr_label(node, SHOWN_ATTRS.get(tag, ()))],
+                     _q(exact_text(node, self.scaffold, self.table_by_node)))
+        elif known and tag in CONTAINER_TAGS:
+            if tag in TRANSPARENT_TAGS:
+                inner = path
+            elif tag in REGION_TAGS and not keep_path:
+                inner = [tag]
             else:
-                self.walk(item, level)
-
-    def image(self, node: Node) -> str:
-        img = next(node.iter("IMG"), None)
-        cap = next(node.iter("IMG-CAPTION"), None)
-        name = node_text(img) if img is not None else ""
-        alt = node_text(cap) if cap is not None else name
-        target = self.image_links.get(name, name)
-        return f"![{_md_inline(alt)}](<{target}>)"
-
-    def table(self, table: Table) -> str:
-        loc = f"<!-- dsd:table T{table.index} rows={len(table.rows)} cols={table.ncols} line={self.doc.line(table.node.start)} -->"
-        if not table.rows:
-            return loc
-        texts = {id(c): node_text(c.node) for c in table.cells}
-        spans = any(c.rowspan > 1 or c.colspan > 1 for c in table.cells)
-        multiline = any("\n" in t for t in texts.values())
-        head_rows = sum(1 for r in table.rows if r.parent is not None and r.parent.tag == "THEAD")
-        if table.ncols <= 1 and not spans:
-            lines = [_md_inline(" ".join(texts[id(c)].split())) for c in table.cells if texts[id(c)].strip()]
-            return loc + ("\n\n" + "  \n".join(lines) if lines else "")
-        if spans or multiline or head_rows > 1 or table.issues:
-            rows_html: List[str] = []
-            for ri, tr in enumerate(table.rows, 1):
-                cells = []
-                for c in table.cells:
-                    if c.row != ri:
-                        continue
-                    tag = "th" if c.node.tag == "TH" else "td"
-                    attrs = ""
-                    if c.rowspan > 1:
-                        attrs += f' rowspan="{c.rowspan}"'
-                    if c.colspan > 1:
-                        attrs += f' colspan="{c.colspan}"'
-                    body = "<br>".join(_html(ln.strip()) for ln in texts[id(c)].split("\n"))
-                    cells.append(f"<{tag}{attrs}>{body}</{tag}>")
-                rows_html.append("<tr>" + "".join(cells) + "</tr>")
-            return loc + "\n\n<table>\n" + "\n".join(rows_html) + "\n</table>"
-        matrix = [
-            [" ".join(texts[id(table.grid[r][c])].split()).replace("|", "\\|") for c in range(table.ncols)]  # type: ignore[index]
-            for r in range(len(table.rows))
-        ]
-        header, rest = matrix[0], matrix[1:]
-        lines = ["| " + " | ".join(header) + " |", "|" + "---|" * table.ncols]
-        lines += ["| " + " | ".join(r) + " |" for r in rest]
-        return loc + "\n\n" + "\n".join(lines)
+                inner = path + [tag]
+            self.walk(node, inner, keep_path)
+        else:
+            # Generic rule: unverified elements, and verified ones somewhere the
+            # rules above do not expect them (a TR outside any TABLE, say).
+            seg = path + [tag + _attr_label(node)]
+            shown = [c for c in node.children if self.scaffold or c.tag not in SCAFFOLD_TAGS]
+            if all(c.tag in INLINE_TAGS for c in shown):
+                self.add(node.start, seg, _q(exact_text(node, self.scaffold, self.table_by_node)))
+            else:
+                self.add(node.start, seg, "")
+                self.walk(node, seg, keep_path=True)
 
 
-def front_matter(arc: Archive, doc: Doc) -> str:
+def read_header(arc: Archive, doc: Doc) -> str:
     head = header_info(doc)
     editor = ""
     try:
@@ -1460,24 +1504,23 @@ def front_matter(arc: Archive, doc: Doc) -> str:
         editor = gen.get("editver", "") if gen is not None else ""
     except DsdError:
         pass
-    fields = [
+    fields: List[Tuple[str, object]] = [
         ("source", arc.path.name),
         ("schema", head.get("schema", "")),
-        ("document", head.get("document_name", "")),
-        ("document_code", head.get("document_code", "")),
-        ("formula_version", head.get("formula_version", "")),
         ("editor_version", editor),
-        ("tables", str(len(doc.tables))),
-        ("images", str(len(arc.images()))),
+        ("tables", len(doc.tables)),
+        ("images", len(arc.images())),
         ("converter", f"dsd.py {VERSION}"),
     ]
-    unverified = unverified_tags(doc.root)
+    unverified: List[str] = unverified_tags(doc.root)
     schema = unverified_schema(doc)
     if schema:
         unverified.insert(0, f"schema {schema}")
     if unverified:
-        fields.append(("unverified", unverified))  # type: ignore[arg-type]
-    return "---\n" + "\n".join(f"{k}: {json.dumps(v, ensure_ascii=False)}" for k, v in fields) + "\n---\n\n"
+        fields.append(("unverified", unverified))
+    fields.append(("legend", f"L<line> <path>[attrs] \"exact text\"; {LINE_BREAK_MARK} = &cr; line break;"
+                             " ⟦TAG⟧…⟦/TAG⟧ = element inside text; T<n> -> run `table FILE n` for cells"))
+    return "".join(f"# {k}: {json.dumps(v, ensure_ascii=False)}\n" for k, v in fields) + "\n"
 
 
 # --------------------------------------------------------------------------
@@ -1683,30 +1726,17 @@ def cmd_read(args: argparse.Namespace) -> int:
     arc = read_archive(args.file)
     doc = Doc(arc.contents)
     out_path = Path(args.output) if args.output and args.output != "-" else None
-    links: Dict[str, str] = {}
-    images = arc.images()
     if out_path is not None:
         _guard_output(out_path, args.force, inputs=[arc.path])
         if _same_file(out_path, arc.path):
-            raise DsdError("refusing to write Markdown over the source .dsd")
-        asset_dir = out_path.with_name(out_path.stem + ".assets")
-        if images:
-            if asset_dir.exists() and not args.force:
-                raise DsdError(f"{asset_dir}: already exists; pass --force only if replacing it is authorized")
-            asset_dir.mkdir(parents=True, exist_ok=True)
-            for i, m in enumerate(images, 1):
-                ext = os.path.splitext(m.name)[1].lower()
-                if not re.fullmatch(r"\.[a-z0-9]{1,5}", ext):
-                    ext = ".bin"
-                target = asset_dir / f"image-{i:03d}{ext}"
-                _atomic_write(target, m.data)
-                links[m.name] = f"{asset_dir.name}/{target.name}"
-    text = (front_matter(arc, doc) if not args.no_front_matter else "") + MarkdownRenderer(doc, links).render()
+            raise DsdError("refusing to write the text view over the source .dsd")
+    view = TextView(doc, scaffold=args.scaffold)
+    text = (read_header(arc, doc) if not args.no_header else "") + view.render()
     if out_path is None:
         sys.stdout.write(text)
     else:
         _atomic_write(out_path, text.encode("utf-8"))
-        _print(f"wrote {out_path} ({len(text)} chars, {len(doc.tables)} tables, {len(links)} images)")
+        _print(f"wrote {out_path} ({len(view.rows)} lines, {len(doc.tables)} tables)")
     return 0
 
 
@@ -1777,17 +1807,112 @@ def compare_archives(orig: Archive, new: Archive) -> List[Issue]:
     return out
 
 
-def block_diff(odoc: Doc, ndoc: Doc) -> Iterator[Tuple[str, Optional[Block], Optional[Block]]]:
-    ob, nb = list(iter_blocks(odoc)), list(iter_blocks(ndoc))
-    sm = difflib.SequenceMatcher(None, [(b.tag, b.text, b.attrs) for b in ob], [(b.tag, b.text, b.attrs) for b in nb], autojunk=False)
+DiffEntry = Tuple[str, Optional[Block], Optional[Block]]
+
+
+def _units(doc: Doc) -> List[List[Block]]:
+    """Blocks grouped into diff units: one per table row, one per text block."""
+    units: List[List[Block]] = []
+    for block in iter_blocks(doc):
+        if units and units[-1][0].group == block.group:
+            units[-1].append(block)
+        else:
+            units.append([block])
+    return units
+
+
+def _pair_blocks(olds: Sequence[Block], news: Sequence[Block]) -> Iterator[DiffEntry]:
+    if len(olds) == len(news):  # same shape: an in-place edit, so pair by position
+        for o, n in zip(olds, news):
+            if o.key() != n.key():
+                yield "changed", o, n
+        return
+    sm = difflib.SequenceMatcher(None, [b.key() for b in olds], [b.key() for b in news], autojunk=False)
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == "equal":
             continue
-        olds, news = ob[i1:i2], nb[j1:j2]
-        for k in range(max(len(olds), len(news))):
-            o = olds[k] if k < len(olds) else None
-            n = news[k] if k < len(news) else None
+        a, b = olds[i1:i2], news[j1:j2]
+        for k in range(max(len(a), len(b))):
+            o = a[k] if k < len(a) else None
+            n = b[k] if k < len(b) else None
             yield ("changed" if o and n else "removed" if o else "added"), o, n
+
+
+def _unit_kind(unit: Sequence[Block]) -> str:
+    """Units of one kind may pair: rows of the same table, or text blocks with the same tag."""
+    group = unit[0].group
+    return group.split("R", 1)[0] if group.startswith("T") else f"<{unit[0].tag}>"
+
+
+def _unit_similarity(o: Sequence[Block], n: Sequence[Block]) -> float:
+    """Cells equal at the same position, plus a 0..1 text resemblance tie-breaker."""
+    same = sum(a.key() == b.key() for a, b in zip(o, n))
+    texts = difflib.SequenceMatcher(None, "\x1f".join(b.text for b in o), "\x1f".join(b.text for b in n), autojunk=False)
+    return same + texts.ratio()
+
+
+# Above this many candidate unit pairs in one changed region, pairing falls
+# back to position; such regions are wholesale rewrites, not row edits.
+MAX_PAIRING_WORK = 40000
+
+
+def _align_units(olds: Sequence[List[Block]], news: Sequence[List[Block]]) -> Iterator[DiffEntry]:
+    """Diff a changed region whose row counts differ.
+
+    Each old unit pairs with at most one new unit, in order, maximizing total
+    similarity; only paired units are compared cell by cell, and unpaired ones
+    are reported whole. A cleared copy-row keeps its template's attributes, so
+    attributes alone cannot tell an inserted row from an edited neighbour.
+    """
+    m, n = len(olds), len(news)
+    if m * n > MAX_PAIRING_WORK:
+        for k in range(max(m, n)):
+            yield from _pair_blocks(olds[k] if k < m else [], news[k] if k < n else [])
+        return
+    score = [[0.0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m - 1, -1, -1):
+        for j in range(n - 1, -1, -1):
+            best = max(score[i + 1][j], score[i][j + 1])
+            if _unit_kind(olds[i]) == _unit_kind(news[j]):
+                best = max(best, score[i + 1][j + 1] + _unit_similarity(olds[i], news[j]))
+            score[i][j] = best
+    i = j = 0
+    while i < m or j < n:
+        if i < m and j < n and _unit_kind(olds[i]) == _unit_kind(news[j]) and (
+            score[i][j] == score[i + 1][j + 1] + _unit_similarity(olds[i], news[j])
+        ):
+            yield from _pair_blocks(olds[i], news[j])
+            i, j = i + 1, j + 1
+        elif i < m and (j == n or score[i][j] == score[i + 1][j]):
+            yield from _pair_blocks(olds[i], [])
+            i += 1
+        else:
+            yield from _pair_blocks([], news[j])
+            j += 1
+
+
+def block_diff(odoc: Doc, ndoc: Doc) -> Iterator[DiffEntry]:
+    """Changed blocks, aligned row by row before cell by cell.
+
+    Matching individual cells lets an empty cell at the end of one row pair
+    with an identical empty cell at the end of an inserted row, which reports
+    the insertion one cell early. Aligning whole rows first keeps an inserted
+    or deleted row in one piece at its real coordinates.
+    """
+    ou, nu = _units(odoc), _units(ndoc)
+
+    def key(unit: List[Block]) -> Tuple[Tuple[str, str, Tuple[Tuple[str, str], ...]], ...]:
+        return tuple(b.key() for b in unit)
+
+    sm = difflib.SequenceMatcher(None, [key(u) for u in ou], [key(u) for u in nu], autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        if op == "replace" and i2 - i1 == j2 - j1:
+            for o_unit, n_unit in zip(ou[i1:i2], nu[j1:j2]):
+                yield from _pair_blocks(o_unit, n_unit)
+        else:
+            yield from _align_units(ou[i1:i2], nu[j1:j2])
 
 
 def raw_line_changes(old: bytes, new: bytes) -> List[Tuple[int, int, int, int]]:
@@ -2004,10 +2129,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--all", action="store_true", help="also list paragraphs, warnings, and empty insertions")
     s.set_defaults(func=cmd_outline)
 
-    s = sub.add_parser("read", help="render the document as Markdown (stdout or -o FILE)")
+    s = sub.add_parser(
+        "read",
+        help="list every block with its line, element path, and exact text; tables as T# stubs",
+        description="One line per block: contents.xml line, element path, and the exact text as a JSON string"
+        " (&cr; shown as ⏎). Tables appear as T# stubs; read their cells with `table`. Elements without"
+        " a rule appear with their attributes, never hidden. Images stay in the archive (see `extract`).",
+    )
     s.add_argument("file")
-    s.add_argument("-o", "--output", help="write Markdown here; images go to <stem>.assets/")
-    s.add_argument("--no-front-matter", action="store_true")
+    s.add_argument("-o", "--output", help="write the view to this file instead of stdout")
+    s.add_argument("--scaffold", action="store_true", help="also show editor scaffolding (COMMENT, LIBRARYLIST, FILENAME)")
+    s.add_argument("--no-header", action="store_true", help="omit the leading # metadata lines")
     s.add_argument("--force", action="store_true", help="replace existing output")
     s.set_defaults(func=cmd_read)
 

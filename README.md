@@ -13,7 +13,7 @@ Agent skill for reading and editing Korean DART Editor `.dsd` documents.
 `skills/dart-dsd/scripts/dsd.py` is a single standard-library Python 3.9+
 script:
 
-- **Read:** `inspect`, `outline`, `read` (Markdown), `table`, `find`
+- **Read:** `inspect`, `outline`, `read` (exact text view), `table`, `find`
 - **Edit:** `set-cell`, `replace`, `copy-row`, `delete-row`, `apply`
   (JSON batch), and `extract`/`pack` for hand edits
 - **Verify:** `check` (structure, images, TOC, table grids, optional XSD via

@@ -69,8 +69,8 @@ DOCUMENT  (xsi:noNamespaceSchemaLocation="dart4.xsd" or "dart3.xsd")
 - Section depth is the number in `SECTION-n`, not XML depth: a `SECTION-1`
   can sit inside a `LIBRARY` that is itself inside a `SECTION-2`.
 - `COMMENT`, `LIBRARYLIST`, `FILENAME`, `WARNING`, and `APPENDIX` comments are
-  editor guidance (`◆click◆ …`) and are not printed. An `INSERTION` without a
-  `LIBRARY` is an unused optional slot.
+  editor guidance (`◆click◆ …`) that DART does not print. An `INSERTION`
+  without a `LIBRARY` is an unused optional slot.
 - `DOCUMENT-HEADER/SUMMARY/EXTRACTION` values (`ACODE` such as `FIN_STAT`,
   `TOT_ASSETS`) feed DART's data extraction. Change them only on request.
 
@@ -108,6 +108,11 @@ TABLE (ACLASS NORMAL|EXTRACTION|FINANCE, WIDTH, BORDER 0|1, AFIXTABLE Y|N)
   and `AUNITVALUE` the machine value (dates as `YYYYMMDD`; codes such as
   `PB_TYPE=1`), with `AUNIT` naming the kind. Keep `AUNITVALUE` in step with
   the text; it is empty in some forms.
+- Forms that state the reporting period twice (cover and the attached
+  statements' title) write the second copy as `PERIODFROM2`/`PERIODTO2`; in
+  every observed file it holds the same dates as `PERIODFROM`/`PERIODTO`.
+  Change both copies together; `check` warns with `period-mismatch` when they
+  disagree.
 - `AUPDATECONT="N"` (**inferred**) marks content the form does not expect the
   user to change.
 - `ROWSPAN`/`COLSPAN` follow HTML rules. Every row must cover every declared
