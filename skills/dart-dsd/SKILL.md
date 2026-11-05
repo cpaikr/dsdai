@@ -53,7 +53,9 @@ stay JSON.
 
 Locators: tables are `T1`, `T2`, … in document order; rows `R#` count THEAD,
 TBODY, and TFOOT rows; columns `C#` are grid columns after span expansion.
-Line numbers refer to `contents.xml`.
+Outputs print them together (`T3R4C2`); commands take bare numbers
+(`dsd table FILE 3`, `--table 3 --row 4 --col 2`). Line numbers refer to
+`contents.xml`.
 
 ## Universal rules
 

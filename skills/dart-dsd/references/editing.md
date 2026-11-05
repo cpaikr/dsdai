@@ -23,10 +23,13 @@ Two routes keep the container intact, and both end in the same verification:
 
 1. **Locate.** Use `find` and `table` to get `T#`/`R#`/`C#` and confirm the
    cell holds what the user means. The same figure often appears in several
-   statements, notes, and periods; identify each intended occurrence.
+   statements, notes, and periods; identify each intended occurrence. Map
+   periods from the header row: 당기 is the column headed with the larger
+   `제 N 기` (usually the first value column), 전기 the smaller.
 2. **Choose the operation.**
    - `set-cell` replaces one cell's text, keeping its `P`/`SPAN` wrapper and
-     attributes; newlines become `&cr;`. A `TU` cell with an `AUNITVALUE`
+     attributes; newlines become `&cr;`:
+     `dsd set-cell FILE -o OUT --table 3 --row 4 --col 2 --text 1,100,000`. A `TU` cell with an `AUNITVALUE`
      needs `--unit-value` in machine form: dates `YYYYMMDD`; currency units
      (`AUNIT=WON`) as codes `1`=원, `2`=천원, `3`=백만원. A value that
      disagrees with the text is refused. Cells with mixed or multi-paragraph
