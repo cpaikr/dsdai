@@ -354,7 +354,7 @@ class UnverifiedContentTests(DsdTestCase):
         code, out, _ = run("read", str(variant))
         self.assertEqual(code, 0)
         self.assertIn('unverified: ["NOTE"]', out)
-        self.assertRegex(out, r"<!-- dsd:unverified NOTE line=\d+: shown as plain text -->\n\n1\. 일반사항")
+        self.assertRegex(out, r"<!-- dsd:unverified NOTE line=\d+: rendering not verified -->\n\n1\. 일반사항")
         code, out, _ = run("find", str(variant), "일반사항")
         self.assertIn("[unverified NOTE]", out)
         code, out, _ = run("outline", str(variant), "--all")
@@ -401,11 +401,45 @@ class UnverifiedContentTests(DsdTestCase):
             ("copy-row", str(variant), "--table", "4", "--row", "3"),
             ("delete-row", str(variant), "--table", "4", "--row", "3"),
             ("replace", str(variant), "--old", "홍길동", "--new", "X"),
+            ("replace", str(variant), "--old", "홍길동", "--new", "X", "--table", "4"),
         ):
             code, _, err = run(*argv, "-o", str(self.out("n.dsd")))
             self.assertEqual(code, 1, argv)
             self.assertIn("not verified", err)
+        edits = self.dir / "edits.json"
+        edits.write_text(json.dumps([{"op": "replace", "old": "홍길동", "new": "X", "table": 4}]), encoding="utf-8")
+        code, _, err = run("apply", str(variant), str(edits), "-o", str(self.out("n.dsd")))
+        self.assertEqual(code, 1)
+        self.assertIn("not verified", err)
         self.assertFalse(self.out("n.dsd").exists())
+        code, out, _ = run("replace", str(variant), "--old", "홍길동", "--new", "X", "--table", "4", "--dry-run")
+        self.assertIn("[inside unverified <NOTE>]", out)
+        code, out, _ = run("table", str(variant), "4")
+        self.assertIn("warning: lies inside unverified <NOTE>", out)
+
+    def test_replace_refuses_unverified_before_counting(self) -> None:
+        code, _, err = run("replace", str(self._note_variant()), "--old", "일반사항", "--new", "X",
+                           "--expect", "3", "-o", str(self.out()))
+        self.assertEqual(code, 1)
+        self.assertIn("not verified", err)
+        self.assertNotIn("expected 3", err)
+
+    def test_unverified_section_keeps_its_outline_title(self) -> None:
+        xml = contents_of(self.src).replace("<SECTION-2 ", "<SECTION-4 ").replace("</SECTION-2>", "</SECTION-4>")
+        code, out, _ = run("outline", str(self._with_contents(xml, "deep.dsd")))
+        self.assertEqual(code, 0)
+        self.assertRegex(out, r"SECTION-4 재무상태표 \[unverified element\]")
+
+    def test_unverified_elements_inside_scaffolding_are_ignored(self) -> None:
+        comment = "<COMMENT>◆click◆ 예시: 정정 안내 문단 삽입</COMMENT>"
+        self.assertIn(comment, contents_of(self.src))
+        xml = contents_of(self.src).replace(comment, comment.replace("◆click◆", "<EMPHASIS>◆click◆</EMPHASIS>"))
+        variant = self._with_contents(xml, "scaffold.dsd")
+        code, out, _ = run("check", str(variant), "--no-schema")
+        self.assertEqual(code, 0, out)
+        self.assertIn("ok (no issues)", out)
+        code, out, _ = run("read", str(variant))
+        self.assertNotIn("unverified", out)
 
     def test_unverified_schema_blocks_edits(self) -> None:
         xml = contents_of(self.src).replace('noNamespaceSchemaLocation="dart4.xsd"', 'noNamespaceSchemaLocation="dart9.xsd"')

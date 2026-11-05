@@ -656,9 +656,27 @@ def img_refs(doc: Doc) -> List[str]:
     return [node_text(n) for n in doc.root.iter("IMG")]
 
 
+def unverified_nodes(node: Node) -> Iterator[Node]:
+    """Elements in `node`'s subtree (itself included) outside OBSERVED_TAGS.
+
+    Editor scaffolding (COMMENT, LIBRARYLIST, FILENAME) is skipped: the helper
+    never renders or edits its contents, so nothing inside it is interpreted.
+    """
+    if node.tag in SCAFFOLD_TAGS:
+        return
+    if node.tag not in OBSERVED_TAGS:
+        yield node
+    for child in node.children:
+        yield from unverified_nodes(child)
+
+
 def unverified_tags(node: Node) -> List[str]:
-    """Tags in `node`'s subtree (itself included) outside OBSERVED_TAGS."""
-    return sorted({n.tag for n in node.iter() if n.tag not in OBSERVED_TAGS})
+    """Tags of unverified_nodes(node), sorted and unique."""
+    return sorted({n.tag for n in unverified_nodes(node)})
+
+
+def unverified_ancestor_tags(node: Node) -> List[str]:
+    return sorted({a.tag for a in node.ancestors() if a.tag not in OBSERVED_TAGS})
 
 
 def unverified_schema(doc: Doc) -> Optional[str]:
@@ -678,7 +696,7 @@ def _require_verified(doc: Doc, node: Node, where: str) -> None:
         raise DsdError(f"{where} contains {names}, which this helper has not verified; {RAW_ROUTE}")
     # An unverified container may change what the target means (as replace and
     # find already assume), so its ancestors count too.
-    outer = sorted({a.tag for a in node.ancestors() if a.tag not in OBSERVED_TAGS})
+    outer = unverified_ancestor_tags(node)
     if outer:
         names = ", ".join(f"<{t}>" for t in outer)
         raise DsdError(f"{where} lies inside {names}, which this helper has not verified; {RAW_ROUTE}")
@@ -721,14 +739,13 @@ def check_archive(arc: Archive) -> Tuple[List[Issue], Optional[Doc]]:
             " edit commands refuse this file",
         ))
     unseen: Dict[str, List[Node]] = {}
-    for node in doc.root.iter():
-        if node.tag not in OBSERVED_TAGS:
-            unseen.setdefault(node.tag, []).append(node)
+    for node in unverified_nodes(doc.root):
+        unseen.setdefault(node.tag, []).append(node)
     for tag, nodes in sorted(unseen.items()):
         issues.append(Issue(
             "warning", "unverified-element",
             f"<{tag}> x{len(nodes)}, first at line {doc.line(nodes[0].start)}: not seen in verified DART output;"
-            " read shows it as plain text and edit commands refuse to touch it",
+            " readers mark it and edit commands refuse to touch it",
         ))
     if meta is not None:
         gen = meta.find("GENERATOR")
@@ -1099,7 +1116,9 @@ def op_replace(
                 return f" [TU AUNITVALUE={c.node.attrs['AUNITVALUE']} is not changed by replace]"
         return ""
 
-    unverified = [n for n in root.iter() if n.tag not in OBSERVED_TAGS]
+    # With --table the root is the TABLE; an unverified container around it
+    # encloses every hit, so it counts too.
+    unverified = list(unverified_nodes(root)) + [a for a in root.ancestors() if a.tag not in OBSERVED_TAGS]
 
     def unverified_note(offset: int) -> str:
         tags = sorted({n.tag for n in unverified if n.open_end <= offset < n.close_start})
@@ -1122,12 +1141,8 @@ def op_replace(
             f"{old!r} not found in text of {scope}; check spacing with `find`"
             " (attribute values and tags are never matched)"
         )
-    if expect is not None and len(hits) != expect:
-        lines = ", ".join(str(doc.line(h[0])) for h in hits[:15])
-        raise DsdError(
-            f"found {len(hits)} occurrence(s) of {old!r} in {scope}, expected {expect} (lines {lines});"
-            " narrow with --table, or set --expect to the verified count"
-        )
+    # Refuse unverified targets before the count check, so fixing --expect is
+    # never a wasted round.
     if schema:
         raise DsdError(f"document schema {schema} is not one this helper was verified on; {RAW_ROUTE}")
     inside = [doc.line(a) for (a, _, _), f in zip(hits, flagged) if f]
@@ -1135,6 +1150,12 @@ def op_replace(
         raise DsdError(
             f"{len(inside)} occurrence(s) lie inside elements this helper has not verified (lines {inside[:15]});"
             f" {RAW_ROUTE}"
+        )
+    if expect is not None and len(hits) != expect:
+        lines = ", ".join(str(doc.line(h[0])) for h in hits[:15])
+        raise DsdError(
+            f"found {len(hits)} occurrence(s) of {old!r} in {scope}, expected {expect} (lines {lines});"
+            " narrow with --table, or set --expect to the verified count"
         )
     lines = sorted({doc.line(h[0]) for h in hits})
     msg = f"replaced {len(hits)} occurrence(s) of {old!r} with {new!r} at lines {lines[:20]}"
@@ -1352,7 +1373,7 @@ class MarkdownRenderer:
             unseen = unverified_tags(item) if leaf else ([tag] if tag not in OBSERVED_TAGS else [])
             if unseen:
                 names = ",".join(unseen).replace("--", "- -")
-                self.emit(f"<!-- dsd:unverified {names} line={self.doc.line(item.start)}: shown as plain text -->")
+                self.emit(f"<!-- dsd:unverified {names} line={self.doc.line(item.start)}: rendering not verified -->")
             if tag == "TITLE":
                 text = " ".join(node_text(item).split())
                 if item.parent is not None and (item.parent.tag in ("PART",) or item.parent.tag.startswith("SECTION-")):
@@ -1538,13 +1559,14 @@ def cmd_outline(args: argparse.Namespace) -> int:
             tag = child.tag
             line = doc.line(child.start)
             pad = "  " * depth
-            if tag not in OBSERVED_TAGS:
-                _print(f"{line:>7}  {pad}<{tag}> unverified element (contents shown below as found)")
-                walk(child, depth + 1)
-            elif tag in ("PART",) or tag.startswith("SECTION-"):
+            if tag in ("PART",) or tag.startswith("SECTION-"):
                 title = next((c for c in child.children if c.tag == "TITLE"), None)
                 name = " ".join(node_text(title).split()) if title is not None else ""
-                _print(f"{line:>7}  {pad}{tag} {name}")
+                flag = " [unverified element]" if tag not in OBSERVED_TAGS else ""
+                _print(f"{line:>7}  {pad}{tag} {name}{flag}")
+                walk(child, depth + 1)
+            elif tag not in OBSERVED_TAGS:
+                _print(f"{line:>7}  {pad}<{tag}> unverified element (contents shown below as found)")
                 walk(child, depth + 1)
             elif tag == "COVER-TITLE":
                 _print(f"{line:>7}  {pad}COVER-TITLE {' '.join(node_text(child).split())}")
@@ -1596,10 +1618,10 @@ def cmd_table(args: argparse.Namespace) -> int:
             f" ACLASS={n.attrs.get('ACLASS', '')} BORDER={n.attrs.get('BORDER', '')} AFIXTABLE={n.attrs.get('AFIXTABLE', '')}"
             f" COL={table.cols}"
         )
-        unseen = unverified_tags(n)
-        if unseen:
-            _print(f"  warning: contains unverified {', '.join(f'<{t}>' for t in unseen)}; coordinates may not"
-                   " match DART Editor and edit commands refuse this table")
+        for relation, unseen in (("contains", unverified_tags(n)), ("lies inside", unverified_ancestor_tags(n))):
+            if unseen:
+                _print(f"  warning: {relation} unverified {', '.join(f'<{t}>' for t in unseen)}; coordinates may"
+                       " not match DART Editor and edit commands refuse this table")
         for ri, tr in enumerate(table.rows, 1):
             flags = f"{tr.parent.tag if tr.parent else ''} ACOPY={tr.attrs.get('ACOPY', '')} ADELETE={tr.attrs.get('ADELETE', '')}"
             _print(f"  R{ri} line={doc.line(tr.start)} {flags}")
