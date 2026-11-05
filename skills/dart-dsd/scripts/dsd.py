@@ -579,9 +579,13 @@ class Block:
     line: int
     attrs: Tuple[Tuple[str, str], ...] = ()
     unverified: Tuple[str, ...] = ()  # unverified tags in or around this block
+    group: str = ""  # cells of one table row share a group ("T3R4"); a text block is its own group
 
     def attr_text(self) -> str:
         return " ".join(f'{k}="{v}"' for k, v in self.attrs)
+
+    def key(self) -> Tuple[str, str, Tuple[Tuple[str, str], ...]]:
+        return self.tag, self.text, self.attrs
 
 
 def iter_blocks(doc: Doc) -> Iterator[Block]:
@@ -603,6 +607,7 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                         doc.line(cell.node.start),
                         tuple(sorted(cell.node.attrs.items())),
                         around,
+                        f"T{table.index}R{cell.row}",
                     )
             elif child.tag in BLOCK_TEXT_TAGS:
                 yield Block(
@@ -612,6 +617,7 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                     doc.line(child.start),
                     tuple(sorted(child.attrs.items())),
                     tuple(sorted(set(outer) | set(unverified_tags(child)))),
+                    f"@{child.start}",  # byte offset: unique even when blocks share a line
                 )
             else:
                 inner = outer if child.tag in VERIFIED_TAGS else tuple(sorted(set(outer) | {child.tag}))
@@ -812,6 +818,7 @@ def check_archive(arc: Archive) -> Tuple[List[Issue], Optional[Doc]]:
         issues.extend(_width_issues(doc, table, where))
         for cell in table.cells:
             issues.extend(_unit_issues(doc, table, cell))
+    issues.extend(_period_issues(doc))
     return issues, doc
 
 
@@ -877,6 +884,33 @@ def _unit_issues(doc: Doc, table: Table, cell: Cell) -> List[Issue]:
         return []
     where = f"T{table.index}R{cell.row}C{cell.col}"
     return [Issue("warning", "unit-value", f"{where}: TU {unit} text shows {shown} but AUNITVALUE={value}")]
+
+
+PERIOD_UNIT_RE = re.compile(r"(PERIODFROM|PERIODTO)2?")
+
+
+def _period_issues(doc: Doc) -> List[Issue]:
+    """Warn when TU cells for the same reporting-period bound disagree.
+
+    Observed: forms that repeat the period (cover and attached-statements
+    title) write the repeat as PERIODFROM2/PERIODTO2 with the same machine
+    date as PERIODFROM/PERIODTO, so a lone edit to one copy leaves the other
+    stale. Other unit kinds (e.g. SUB_PERIODFROM) are not compared.
+    """
+    bounds: Dict[str, List[Tuple[str, str]]] = {}
+    for table in doc.tables:
+        for cell in table.cells:
+            node = cell.node
+            m = PERIOD_UNIT_RE.fullmatch(node.attrs.get("AUNIT", ""))
+            if node.tag == "TU" and m and node.attrs.get("AUNITVALUE"):
+                loc = f"T{table.index}R{cell.row}C{cell.col}"
+                bounds.setdefault(m.group(1), []).append((loc, node.attrs["AUNITVALUE"]))
+    out: List[Issue] = []
+    for bound, cells in sorted(bounds.items()):
+        if len({value for _, value in cells}) > 1:
+            listing = ", ".join(f"{loc}={value}" for loc, value in cells)
+            out.append(Issue("warning", "period-mismatch", f"{bound}/{bound}2 TU cells disagree: {listing}"))
+    return out
 
 
 def schema_validate(contents: bytes, schema_dir: Path, schema_name: str) -> List[Issue]:
@@ -978,9 +1012,13 @@ def op_set_cell(
     _require_verified(doc, table.node, f"T{table_no}")
     cell = cell_at(table, row, col)
     node = cell.node
-    note = ""
     if (cell.row, cell.col) != (row, col):
-        note = f" (R{row}C{col} is covered by the spanning cell at R{cell.row}C{cell.col})"
+        # Writing the anchor instead would silently change a header or label
+        # the caller never addressed.
+        raise DsdError(
+            f"T{table_no} R{row}C{col} is covered by the spanning cell at R{cell.row}C{cell.col};"
+            f" address that cell (--row {cell.row} --col {cell.col}) if it is the one to change"
+        )
     where = f"T{table_no}R{cell.row}C{cell.col}"
     if node.tag == "TU" and node.attrs.get("AUNITVALUE") and unit_value is None:
         raise DsdError(
@@ -1015,7 +1053,7 @@ def op_set_cell(
             edits.append(_set_attr(data, node, "AUNITVALUE", unit_value))
         edits.append((leaf.open_end, leaf.close_start, new_inner))
     before = node_text(node)
-    return _replace_ranges(data, edits), f"{where} {node.tag}: {before!r} -> {text!r}{note}"
+    return _replace_ranges(data, edits), f"{where} {node.tag}: {before!r} -> {text!r}"
 
 
 def _date_digits(text: str) -> str:
@@ -1769,17 +1807,112 @@ def compare_archives(orig: Archive, new: Archive) -> List[Issue]:
     return out
 
 
-def block_diff(odoc: Doc, ndoc: Doc) -> Iterator[Tuple[str, Optional[Block], Optional[Block]]]:
-    ob, nb = list(iter_blocks(odoc)), list(iter_blocks(ndoc))
-    sm = difflib.SequenceMatcher(None, [(b.tag, b.text, b.attrs) for b in ob], [(b.tag, b.text, b.attrs) for b in nb], autojunk=False)
+DiffEntry = Tuple[str, Optional[Block], Optional[Block]]
+
+
+def _units(doc: Doc) -> List[List[Block]]:
+    """Blocks grouped into diff units: one per table row, one per text block."""
+    units: List[List[Block]] = []
+    for block in iter_blocks(doc):
+        if units and units[-1][0].group == block.group:
+            units[-1].append(block)
+        else:
+            units.append([block])
+    return units
+
+
+def _pair_blocks(olds: Sequence[Block], news: Sequence[Block]) -> Iterator[DiffEntry]:
+    if len(olds) == len(news):  # same shape: an in-place edit, so pair by position
+        for o, n in zip(olds, news):
+            if o.key() != n.key():
+                yield "changed", o, n
+        return
+    sm = difflib.SequenceMatcher(None, [b.key() for b in olds], [b.key() for b in news], autojunk=False)
     for op, i1, i2, j1, j2 in sm.get_opcodes():
         if op == "equal":
             continue
-        olds, news = ob[i1:i2], nb[j1:j2]
-        for k in range(max(len(olds), len(news))):
-            o = olds[k] if k < len(olds) else None
-            n = news[k] if k < len(news) else None
+        a, b = olds[i1:i2], news[j1:j2]
+        for k in range(max(len(a), len(b))):
+            o = a[k] if k < len(a) else None
+            n = b[k] if k < len(b) else None
             yield ("changed" if o and n else "removed" if o else "added"), o, n
+
+
+def _unit_kind(unit: Sequence[Block]) -> str:
+    """Units of one kind may pair: rows of the same table, or text blocks with the same tag."""
+    group = unit[0].group
+    return group.split("R", 1)[0] if group.startswith("T") else f"<{unit[0].tag}>"
+
+
+def _unit_similarity(o: Sequence[Block], n: Sequence[Block]) -> float:
+    """Cells equal at the same position, plus a 0..1 text resemblance tie-breaker."""
+    same = sum(a.key() == b.key() for a, b in zip(o, n))
+    texts = difflib.SequenceMatcher(None, "\x1f".join(b.text for b in o), "\x1f".join(b.text for b in n), autojunk=False)
+    return same + texts.ratio()
+
+
+# Above this many candidate unit pairs in one changed region, pairing falls
+# back to position; such regions are wholesale rewrites, not row edits.
+MAX_PAIRING_WORK = 40000
+
+
+def _align_units(olds: Sequence[List[Block]], news: Sequence[List[Block]]) -> Iterator[DiffEntry]:
+    """Diff a changed region whose row counts differ.
+
+    Each old unit pairs with at most one new unit, in order, maximizing total
+    similarity; only paired units are compared cell by cell, and unpaired ones
+    are reported whole. A cleared copy-row keeps its template's attributes, so
+    attributes alone cannot tell an inserted row from an edited neighbour.
+    """
+    m, n = len(olds), len(news)
+    if m * n > MAX_PAIRING_WORK:
+        for k in range(max(m, n)):
+            yield from _pair_blocks(olds[k] if k < m else [], news[k] if k < n else [])
+        return
+    score = [[0.0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m - 1, -1, -1):
+        for j in range(n - 1, -1, -1):
+            best = max(score[i + 1][j], score[i][j + 1])
+            if _unit_kind(olds[i]) == _unit_kind(news[j]):
+                best = max(best, score[i + 1][j + 1] + _unit_similarity(olds[i], news[j]))
+            score[i][j] = best
+    i = j = 0
+    while i < m or j < n:
+        if i < m and j < n and _unit_kind(olds[i]) == _unit_kind(news[j]) and (
+            score[i][j] == score[i + 1][j + 1] + _unit_similarity(olds[i], news[j])
+        ):
+            yield from _pair_blocks(olds[i], news[j])
+            i, j = i + 1, j + 1
+        elif i < m and (j == n or score[i][j] == score[i + 1][j]):
+            yield from _pair_blocks(olds[i], [])
+            i += 1
+        else:
+            yield from _pair_blocks([], news[j])
+            j += 1
+
+
+def block_diff(odoc: Doc, ndoc: Doc) -> Iterator[DiffEntry]:
+    """Changed blocks, aligned row by row before cell by cell.
+
+    Matching individual cells lets an empty cell at the end of one row pair
+    with an identical empty cell at the end of an inserted row, which reports
+    the insertion one cell early. Aligning whole rows first keeps an inserted
+    or deleted row in one piece at its real coordinates.
+    """
+    ou, nu = _units(odoc), _units(ndoc)
+
+    def key(unit: List[Block]) -> Tuple[Tuple[str, str, Tuple[Tuple[str, str], ...]], ...]:
+        return tuple(b.key() for b in unit)
+
+    sm = difflib.SequenceMatcher(None, [key(u) for u in ou], [key(u) for u in nu], autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        if op == "replace" and i2 - i1 == j2 - j1:
+            for o_unit, n_unit in zip(ou[i1:i2], nu[j1:j2]):
+                yield from _pair_blocks(o_unit, n_unit)
+        else:
+            yield from _align_units(ou[i1:i2], nu[j1:j2])
 
 
 def raw_line_changes(old: bytes, new: bytes) -> List[Tuple[int, int, int, int]]:

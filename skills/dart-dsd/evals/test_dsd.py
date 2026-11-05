@@ -244,6 +244,35 @@ class EditTests(DsdTestCase):
         code, diff, _ = run("diff", str(self.src), str(self.out("b.dsd")))
         self.assertIn('@AUNITVALUE "20251231" -> "20261231"', diff)
 
+    def test_set_cell_refuses_span_covered_coordinates(self) -> None:
+        # T4 R1C3 lies under the COLSPAN="2" header anchored at R1C2.
+        code, _, err = run("set-cell", str(self.src), "--table", "4", "--row", "1", "--col", "3",
+                           "--text", "X", "-o", str(self.out()))
+        self.assertEqual(code, 1)
+        self.assertIn("covered by the spanning cell at R1C2", err)
+        self.assertFalse(self.out().exists())
+        code, _, err = run("set-cell", str(self.src), "--table", "4", "--row", "1", "--col", "2",
+                           "--text", "X", "-o", str(self.out()))
+        self.assertEqual(code, 0, err)
+
+    def test_check_warns_when_period_copies_disagree(self) -> None:
+        repeat = (
+            '<TU ALIGN="RIGHT" AUNIT="PERIODTO2" AUNITVALUE="20251231" HEIGHT="23" WIDTH="333">'
+            "2025년 12월 31일</TU>"
+        )
+        xml = contents_of(self.src).replace("<TD HEIGHT=\"23\" WIDTH=\"249\">까지</TD>", repeat, 1)
+        self.assertIn("PERIODTO2", xml)
+        variant = self._with_contents(xml)
+        code, out, _ = run("check", str(variant), "--no-schema")
+        self.assertNotIn("period-mismatch", out)
+        # Moving only the first copy leaves the repeat stale.
+        code, out, err = run("set-cell", str(variant), "--table", "1", "--row", "2", "--col", "1",
+                             "--text", "2026년 12월 31일", "--unit-value", "20261231", "-o", str(self.out()))
+        self.assertEqual(code, 0, err)
+        self.assertIn("period-mismatch", out)
+        code, out, _ = run("check", str(self.out()), "--no-schema")
+        self.assertIn("PERIODTO/PERIODTO2 TU cells disagree: T1R2C1=20261231, T1R2C2=20251231", out)
+
     def test_set_cell_fills_empty_and_self_closing_wrappers(self) -> None:
         a = self.out("a.dsd")
         run("copy-row", str(self.src), "--table", "4", "--row", "3", "--clear", "-o", str(a))
@@ -348,6 +377,68 @@ class EditTests(DsdTestCase):
         code, diff, _ = run("diff", str(self.src), str(self.out()))
         self.assertIn('"제 5 기" -> "제 6 기"', diff)
         self.assertIn('"김철수"', diff)
+
+    def test_diff_reports_inserted_row_at_its_coordinates(self) -> None:
+        # An empty last cell next to a long unchanged tail used to pair with the
+        # inserted row's empty last cell and shift the report one cell early.
+        xml = contents_of(self.src).replace(
+            'WIDTH="176">500,000</TD>\r\n</TR>\r\n\r\n<TR ACOPY="N"', 'WIDTH="176"></TD>\r\n</TR>\r\n\r\n<TR ACOPY="N"', 1)
+        tail = "".join(f"<P>꼬리 {i}</P>\r\n" for i in range(40))
+        xml = xml.replace("<PGBRK></PGBRK>\r\n</SECTION-2>", tail + "<PGBRK></PGBRK>\r\n</SECTION-2>", 1)
+        base = self._with_contents(xml)
+        edits = self.dir / "edits.json"
+        edits.write_text(json.dumps([
+            {"op": "copy-row", "table": 3, "row": 5, "clear": True},
+            {"op": "set-cell", "table": 3, "row": 6, "col": 1, "text": "   테스트"},
+            {"op": "set-cell", "table": 3, "row": 6, "col": 2, "text": "(1,000)"},
+        ], ensure_ascii=False), encoding="utf-8")
+        code, _, err = run("apply", str(base), str(edits), "-o", str(self.out()))
+        self.assertEqual(code, 0, err)
+        code, diff, _ = run("diff", str(base), str(self.out()))
+        changes = [line for line in diff.splitlines() if line[:2] in ("+ ", "- ", "~ ")]
+        self.assertEqual(changes, ['+ T3R6C1 TD "   테스트"', '+ T3R6C2 TD "(1,000)"', '+ T3R6C3 TD ""'])
+        # Deleting it again is reported as the same whole row, and in-place
+        # edits still pair cell by cell.
+        code, _, err = run("delete-row", str(self.out()), "--table", "3", "--row", "6", "-o", str(self.out("b.dsd")))
+        self.assertEqual(code, 0, err)
+        code, diff, _ = run("diff", str(self.out()), str(self.out("b.dsd")))
+        self.assertEqual([line[:9] for line in diff.splitlines() if line.startswith("- ")], ["- T3R6C1 ", "- T3R6C2 ", "- T3R6C3 "])
+        code, _, err = run("set-cell", str(base), "--table", "3", "--row", "3", "--col", "2",
+                           "--text", "999", "-o", str(self.out("c.dsd")))
+        self.assertEqual(code, 0, err)
+        code, diff, _ = run("diff", str(base), str(self.out("c.dsd")))
+        self.assertIn('~ T3R3C2 -> T3R3C2  "1,500,000" -> "999"', diff)
+        self.assertIn("1 changed block(s)", diff)
+
+    def test_diff_pairs_edited_row_next_to_inserted_row(self) -> None:
+        # The edited row holds two equal cells, so cell matching alone can pair
+        # the wrong one once a row is inserted beside it.
+        def changes(edits: list) -> list:
+            path = self.dir / "edits.json"
+            path.write_text(json.dumps(edits, ensure_ascii=False), encoding="utf-8")
+            out = self.out("adj.dsd")
+            code, _, err = run("apply", str(self.src), str(path), "-o", str(out), "--force")
+            self.assertEqual(code, 0, err)
+            _, diff, _ = run("diff", str(self.src), str(out))
+            return [line for line in diff.splitlines() if line[:2] in ("+ ", "- ", "~ ")]
+
+        self.assertEqual(changes([
+            {"op": "copy-row", "table": 3, "row": 4, "clear": True},
+            {"op": "set-cell", "table": 3, "row": 5, "col": 1, "text": "   기타"},
+            {"op": "set-cell", "table": 3, "row": 6, "col": 2, "text": "1,600,000"},
+        ]), [
+            '+ T3R5C1 TD "   기타"', '+ T3R5C2 TD ""', '+ T3R5C3 TD ""',
+            '~ T3R5C2 -> T3R6C2  "500,000" -> "1,600,000"',
+        ])
+        # Filling a cell and inserting a row right after it stays two separate changes.
+        self.assertEqual(changes([
+            {"op": "set-cell", "table": 3, "row": 5, "col": 3, "text": "X"},
+            {"op": "copy-row", "table": 3, "row": 5, "clear": True},
+            {"op": "set-cell", "table": 3, "row": 6, "col": 1, "text": "x"},
+        ]), [
+            '~ T3R5C3 -> T3R5C3  "500,000" -> "X"',
+            '+ T3R6C1 TD "x"', '+ T3R6C2 TD ""', '+ T3R6C3 TD ""',
+        ])
 
     def test_output_guards(self) -> None:
         code, _, err = run("set-cell", str(self.src), "--table", "3", "--row", "4", "--col", "2",

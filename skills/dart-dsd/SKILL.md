@@ -104,7 +104,9 @@ that, and both end in the same verification:
      requires `--unit-value` in the matching machine form (dates
      `YYYYMMDD`); a date that disagrees with the text is refused. Cells with
      mixed or multi-paragraph content are refused; hand-edit them, or use
-     `--flatten` only when losing that formatting is acceptable.
+     `--flatten` only when losing that formatting is acceptable. A position
+     covered by another cell's `ROWSPAN`/`COLSPAN` is refused; the error
+     names the spanning cell to address instead.
    - `replace --old A --new B` changes document text within a single text
      run. It never matches tags, attribute values, comments, entity
      references, or editor scaffolding, and cannot match across `SPAN`/`P`
@@ -136,9 +138,9 @@ that, and both end in the same verification:
 4. **Carry related figures.** The helper does not recompute totals or
    cross-references. A changed figure can affect subtotals, totals, other
    statements, and notes. A changed period can affect the other period
-   bound, `제 N 기` labels, and dates written in paragraphs. Update those
-   too when the request covers them. Otherwise, list them for the user as
-   unchanged dependents.
+   bound, its repeated `PERIODFROM2`/`PERIODTO2` copy, `제 N 기` labels, and
+   dates written in paragraphs. Update those too when the request covers
+   them. Otherwise, list them for the user as unchanged dependents.
 
 Every edit command re-checks the result. It writes nothing if the change
 would add a structural error or turn CRLF line endings into LF.
@@ -147,10 +149,10 @@ would add a structural error or turn CRLF line endings into LF.
 
 1. Run `check OUT --against ORIGINAL`. It checks structure, image and
    `meta.xml` consistency, TOC numbering, table grids, size conventions,
-   `TU` date values, and line endings. It also validates against the DART
-   schema when `lxml` and a schema directory (`--schema-dir`,
-   `DART_SCHEMA_DIR`, or `C:\DART\Resource\Dtd`) are available, and
-   otherwise reports `schema-skipped`.
+   `TU` date values and repeated period copies, and line endings. It also
+   validates against the DART schema when `lxml` and a schema directory
+   (`--schema-dir`, `DART_SCHEMA_DIR`, or `C:\DART\Resource\Dtd`) are
+   available, and otherwise reports `schema-skipped`.
 2. Run `diff ORIGINAL OUT`. It lists changed cells and text blocks,
    including attribute changes such as `@AUNITVALUE`, then the count and
    location of changed raw `contents.xml` lines and any other changed
