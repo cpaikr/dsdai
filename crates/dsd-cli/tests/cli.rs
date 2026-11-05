@@ -939,3 +939,55 @@ fn rejects_corrupt_archives() {
     std::fs::write(w.path("y.dsd"), &bytes).unwrap();
     dsd(["inspect", &s(&w.path("y.dsd"))]).fails("invalid_archive");
 }
+
+// ---------------------------------------------------------------------------
+// resource bounds
+
+#[test]
+fn huge_spans_stay_bounded() {
+    let w = Work::new("hugespan");
+    let xml = replace_once(
+        &w.contents(),
+        "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">홍길동</TD>",
+        "<TD COLSPAN=\"100000000000\">홍길동</TD>",
+    );
+    let v = w.variant("span.dsd", &xml);
+    let run = dsd(["check", &s(&v), "--no-schema"]);
+    assert!(run.json()["result"]["issues"].to_string().contains("table-grid"));
+    let no_colgroup = w.variant(
+        "nocols.dsd",
+        &replace_once(
+            &w.contents(),
+            "<P>1. 일반사항</P>",
+            "<TABLE><TBODY><TR><TD COLSPAN=\"100000000000000\">x</TD></TR></TBODY></TABLE>",
+        ),
+    );
+    let run = dsd(["check", &s(&no_colgroup), "--no-schema"]);
+    assert!(run.json()["result"]["issues"].to_string().contains("grid is limited"));
+}
+
+#[test]
+fn deep_nesting_is_refused() {
+    let w = Work::new("deep");
+    let deep = format!("<P>{}x{}</P>", "<SPAN>".repeat(5000), "</SPAN>".repeat(5000));
+    let v = w.variant("deep.dsd", &replace_once(&w.contents(), "<P>1. 일반사항</P>", &deep));
+    dsd(["read", &s(&v)]).fails("invalid_xml");
+    assert!(dsd(["check", &s(&v), "--no-schema"]).stdout.contains("nested too deeply"));
+}
+
+#[test]
+fn non_utf8_declarations_are_refused() {
+    let w = Work::new("encoding");
+    let v = w.variant("enc.dsd", &w.contents().replacen("encoding=\"utf-8\"", "encoding=\"EUC-KR\"", 1));
+    let run = dsd(["read", &s(&v)]);
+    run.fails("invalid_xml");
+    assert!(run.error_text().contains("must be UTF-8"));
+}
+
+#[test]
+fn find_stops_at_the_limit_like_the_helper() {
+    let w = Work::new("findlimit");
+    let r = dsd(["find", &s(&w.src()), "000", "--limit", "2"]).ok();
+    assert_eq!(r["matches"].as_array().unwrap().len(), 2);
+    assert_eq!(r["limited"], true);
+}

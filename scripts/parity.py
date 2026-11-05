@@ -6,6 +6,12 @@ fixture and, when present, every private sample, and compares text views,
 check and inspect results, edit outputs, and diffs. Prints sample indexes and
 pass/fail only, never document text or file names.
 
+Deliberate differences, not compared: JSON envelopes replace the helper's
+JSON/text mix (`find` with no match exits 0 with an empty list); the CLI
+refuses an empty `find` query, `apply` copy-row counts below 1, non-UTF-8
+XML declarations, nesting deeper than 512 elements, and manifest paths that
+leave the extract directory; and schema validation needs no lxml.
+
 Usage: python scripts/parity.py [path/to/dsd]
 """
 
@@ -72,9 +78,10 @@ def views(i: int, src: Path) -> None:
         same(f"#{i} table all --spans", text(py("table", s, *nums, "--spans")), text(rs("table", s, *nums, "--spans", "--format", "text")))
     blocks = [r for r in envelope(rs("read", s))["result"]["rows"] if r.get("text", "").strip()]
     for q in {b["text"].strip()[:4] for b in blocks[:: max(1, len(blocks) // 6)]}:
-        for extra in ([], ["--exact"]):
-            same(f"#{i} find{' --exact' if extra else ''}", text(py("find", s, q, *extra, "--limit", "1000")),
-                 text(rs("find", s, q, *extra, "--limit", "1000", "--format", "text")))
+        for extra in ([], ["--exact"], ["--limit", "3"]):
+            args = extra if "--limit" in extra else [*extra, "--limit", "1000"]
+            same(f"#{i} find {' '.join(extra)}", text(py("find", s, q, *args)),
+                 text(rs("find", s, q, *args, "--format", "text")))
 
 
 def checks(i: int, src: Path) -> None:
@@ -90,6 +97,38 @@ def checks(i: int, src: Path) -> None:
     same(f"#{i} inspect counts", p.get("document", {}).get("counts"), r.get("document", {}).get("counts"))
     same(f"#{i} inspect members", [(m["name"], m["size"], m["method"]) for m in p["members"]],
          [(m["name"], m["size"], m["method"]) for m in r["members"]])
+
+
+SCHEMA_MUTATIONS = [
+    # (old, new): each must make the document schema-invalid.
+    ("<TBODY>", "<TBODY><BOGUS/>"),
+    ("<TR ", "<TR ABOGUS=\"1\" "),
+    ("<TBODY>", "<TBODY>stray text"),
+    ("</COLGROUP>", "</COLGROUP><COLGROUP></COLGROUP><TITLE>x</TITLE>"),
+    ("<BODY", "<BODY><BODY></BODY"),
+]
+
+
+def schema(i: int, src: Path, tmp: Path) -> None:
+    """Validity under both validators for each mutation that applies."""
+    work = tmp / f"s{i}"
+    rs("extract", str(src), str(work))
+    xml = (work / "contents.xml").read_bytes()
+    for k, (old, new) in enumerate(SCHEMA_MUTATIONS):
+        if old.encode() not in xml:
+            continue
+        (work / "contents.xml").write_bytes(xml.replace(old.encode(), new.encode(), 1))
+        out = tmp / f"s{i}-{k}.dsd"
+        # pack refuses structural errors, so build the archive with the raw writer.
+        with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                data = (work / "contents.xml").read_bytes() if info.filename == "contents.xml" else zin.read(info)
+                zout.writestr(info, data)
+        p = {x["code"] for x in json.loads(py("check", str(out), "--json").stdout)}
+        r = envelope(rs("check", str(out)))
+        rc = {x["code"] for x in (r["result"] or {}).get("issues", [])}
+        same(f"#{i} schema mutation {k}", "schema-invalid" in p, "schema-invalid" in rc)
+    (work / "contents.xml").write_bytes(xml)
 
 
 def edits(i: int, src: Path, tmp: Path) -> None:
@@ -152,6 +191,7 @@ def main() -> int:
             before = len(failures)
             views(i, src)
             checks(i, src)
+            schema(i, src, tmp)
             edits(i, src, tmp)
             print(f"{'ok  ' if len(failures) == before else 'FAIL'} sample #{i}")
     print(f"\n{len(failures)} difference(s)" if failures else "\nparity: all comparisons equal")

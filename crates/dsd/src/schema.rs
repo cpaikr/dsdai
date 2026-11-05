@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use crate::check::Issue;
 use crate::doc::Doc;
@@ -204,8 +205,12 @@ impl Builder<'_> {
         let id = self.types.len();
         self.types.push(None);
         self.memo.insert(qname.to_owned(), id);
-        let built = self.complex_type(node)?;
-        self.types[id] = Some(built);
+        // A reference back to an enclosing group through a named type is not
+        // recursion: the type is already reserved, so compilation stops there.
+        let outer = std::mem::take(&mut self.group_stack);
+        let built = self.complex_type(node);
+        self.group_stack = outer;
+        self.types[id] = Some(built?);
         Ok(id)
     }
 
@@ -296,6 +301,7 @@ impl Builder<'_> {
             return Ok(id);
         }
         let node = *self.elements.get(name).ok_or_else(|| unsupported(&format!("unknown element ref {name}")))?;
+        self.check_attrs(node, &["name", "type"])?;
         let inline = self.parts(node);
         if let (None, [c]) = (self.attr(node, "type"), inline.as_slice())
             && self.kind(*c) == "complexType"
@@ -303,8 +309,10 @@ impl Builder<'_> {
             let id = self.types.len();
             self.types.push(None);
             self.memo.insert(key, id);
-            let built = self.complex_type(*c)?;
-            self.types[id] = Some(built);
+            let outer = std::mem::take(&mut self.group_stack);
+            let built = self.complex_type(*c);
+            self.group_stack = outer;
+            self.types[id] = Some(built?);
             return Ok(id);
         }
         let id = self.element_type(node)?;
@@ -337,7 +345,8 @@ impl Schema {
         let root = tree.node(tree.root);
         let prefix = match root.tag.split_once(':') {
             Some((p, "schema")) if root.attr(&format!("xmlns:{p}")) == Some(XS_NS) => format!("{p}:"),
-            None if root.tag == "schema" && root.attr("xmlns") == Some(XS_NS) => String::new(),
+            // Without a prefix, built-in and schema-defined type names could collide.
+            None if root.tag == "schema" => return Err(unsupported("schema without a namespace prefix")),
             _ => return Err(unsupported("document is not an XML Schema")),
         };
         let mut b = Builder {
@@ -416,7 +425,32 @@ fn is_ncname(v: &str) -> bool {
     chars.next().is_some_and(|c| c.is_alphabetic() || c == '_') && v.chars().all(|c| is_name_char(c) && c != ':')
 }
 
-type Assign = Vec<TypeId>;
+/// The declarations assigned to the children matched so far, newest first,
+/// shared between alternatives so extending one costs O(1).
+#[derive(Clone, Default)]
+struct Assign(Option<Rc<Link>>);
+
+struct Link {
+    ty: TypeId,
+    prev: Assign,
+}
+
+impl Assign {
+    fn push(&self, ty: TypeId) -> Self {
+        Self(Some(Rc::new(Link { ty, prev: self.clone() })))
+    }
+
+    fn to_vec(&self) -> Vec<TypeId> {
+        let mut out = Vec::new();
+        let mut cur = self.0.as_ref();
+        while let Some(link) = cur {
+            out.push(link.ty);
+            cur = link.prev.0.as_ref();
+        }
+        out.reverse();
+        out
+    }
+}
 
 impl Validator<'_> {
     fn error(&mut self, node: NodeId, message: &str) {
@@ -503,9 +537,9 @@ impl Validator<'_> {
                 }
                 let tags: Vec<&str> = children.iter().map(|&c| tree.tag(c)).collect();
                 let mut furthest = 0;
-                let ends = match_particle(model, &tags, 0, &mut furthest);
+                let ends = match_particle(model, &tags, 0, &Assign::default(), &mut furthest);
                 if let Some(assign) = ends.get(&tags.len()) {
-                    for (&child, &cty) in children.iter().zip(assign) {
+                    for (&child, cty) in children.iter().zip(assign.to_vec()) {
                         self.element(child, cty);
                     }
                 } else {
@@ -546,23 +580,24 @@ fn bounds(p: &Particle) -> (usize, Occurs) {
     }
 }
 
-/// End positions reachable by one occurrence of the particle's term.
-fn match_once(p: &Particle, tags: &[&str], pos: usize, furthest: &mut usize) -> Ends {
+/// End positions reachable by one occurrence of the particle's term, each with
+/// the full assignment (`prefix` extended by this occurrence's children).
+fn match_once(p: &Particle, tags: &[&str], pos: usize, prefix: &Assign, furthest: &mut usize) -> Ends {
     let mut out = Ends::new();
     match p {
         Particle::Element { name, ty, .. } => {
             if tags.get(pos) == Some(&name.as_str()) {
-                out.insert(pos + 1, vec![*ty]);
+                out.insert(pos + 1, prefix.push(*ty));
                 *furthest = (*furthest).max(pos + 1);
             }
         }
         Particle::Sequence { items, .. } => {
-            let mut frontier = Ends::from([(pos, Vec::new())]);
+            let mut frontier = Ends::from([(pos, prefix.clone())]);
             for item in items {
                 let mut next = Ends::new();
                 for (start, assign) in &frontier {
-                    for (end, more) in match_particle(item, tags, *start, furthest) {
-                        next.entry(end).or_insert_with(|| [assign.clone(), more].concat());
+                    for (end, full) in match_particle(item, tags, *start, assign, furthest) {
+                        next.entry(end).or_insert(full);
                     }
                 }
                 frontier = next;
@@ -574,8 +609,8 @@ fn match_once(p: &Particle, tags: &[&str], pos: usize, furthest: &mut usize) -> 
         }
         Particle::Choice { items, .. } => {
             for item in items {
-                for (end, assign) in match_particle(item, tags, pos, furthest) {
-                    out.entry(end).or_insert(assign);
+                for (end, full) in match_particle(item, tags, pos, prefix, furthest) {
+                    out.entry(end).or_insert(full);
                 }
             }
         }
@@ -584,7 +619,7 @@ fn match_once(p: &Particle, tags: &[&str], pos: usize, furthest: &mut usize) -> 
 }
 
 /// End positions reachable by the particle including its occurrence bounds.
-fn match_particle(p: &Particle, tags: &[&str], pos: usize, furthest: &mut usize) -> Ends {
+fn match_particle(p: &Particle, tags: &[&str], pos: usize, prefix: &Assign, furthest: &mut usize) -> Ends {
     let (min, max) = bounds(p);
     let cap = match max {
         Occurs::Bounded(m) => m,
@@ -593,17 +628,17 @@ fn match_particle(p: &Particle, tags: &[&str], pos: usize, furthest: &mut usize)
     };
     let mut results = Ends::new();
     if min == 0 {
-        results.insert(pos, Vec::new());
+        results.insert(pos, prefix.clone());
     }
-    let mut frontier = Ends::from([(pos, Vec::new())]);
+    let mut frontier = Ends::from([(pos, prefix.clone())]);
     for k in 1..=cap {
         let mut next = Ends::new();
         for (start, assign) in &frontier {
-            for (end, more) in match_once(p, tags, *start, furthest) {
+            for (end, full) in match_once(p, tags, *start, assign, furthest) {
                 if end == *start && k > min {
                     continue;
                 }
-                next.entry(end).or_insert_with(|| [assign.clone(), more].concat());
+                next.entry(end).or_insert(full);
             }
         }
         if next.is_empty() {
@@ -695,7 +730,8 @@ mod tests {
       </xs:sequence>
     </xs:complexType>
   </xs:element>
-  <xs:group name="extras"><xs:sequence><xs:element name="BR" type="emptyType"/></xs:sequence></xs:group>
+  <xs:group name="extras"><xs:sequence><xs:element name="BR" type="emptyType"/><xs:element name="BOX" type="boxType" minOccurs="0"/></xs:sequence></xs:group>
+  <xs:complexType name="boxType"><xs:sequence><xs:group ref="extras" minOccurs="0"/></xs:sequence></xs:complexType>
   <xs:complexType name="emptyType"><xs:attribute name="ID" type="xs:ID"/></xs:complexType>
   <xs:complexType name="headType">
     <xs:simpleContent><xs:extension base="xs:string">
@@ -719,7 +755,9 @@ mod tests {
     #[test]
     fn accepts_a_valid_document() {
         assert_eq!(
-            errors(r#"<ROOT><HEAD CODE="1">t</HEAD><P ALIGN=" LEFT ">a<P>b</P></P><BR ID="x"/><P/></ROOT>"#),
+            errors(
+                r#"<ROOT><HEAD CODE="1">t</HEAD><P ALIGN=" LEFT ">a<P>b</P></P><BR ID="x"/><BOX><BR/></BOX><P/></ROOT>"#
+            ),
             Vec::<String>::new()
         );
     }

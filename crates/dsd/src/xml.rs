@@ -11,6 +11,19 @@ use crate::error::{Error, ErrorCode, Result};
 
 pub type NodeId = usize;
 
+/// Deeper nesting is refused: no DART document comes close, and every
+/// consumer of the tree recurses over it.
+pub const MAX_DEPTH: usize = 512;
+
+/// The `encoding` pseudo-attribute of an XML declaration body.
+fn declared_encoding(decl: &str) -> Option<&str> {
+    let at = decl.find("encoding")?;
+    let rest = decl[at + 8..].trim_start().strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next().filter(|q| *q == '"' || *q == '\'')?;
+    let body = &rest[1..];
+    body.find(quote).map(|end| &body[..end])
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Text(String),
@@ -225,6 +238,16 @@ impl Parser<'_> {
             }
             let end = self.find("?>", self.pos).ok_or_else(|| self.err(at, "unclosed token"))?;
             self.check_chars(self.pos, end)?;
+            if target == "xml"
+                && let Some(enc) = declared_encoding(&self.src[self.pos..end])
+                && !enc.eq_ignore_ascii_case("utf-8")
+                && !enc.eq_ignore_ascii_case("utf8")
+            {
+                return Err(Error::new(
+                    ErrorCode::InvalidXml,
+                    format!("XML declares encoding {enc}; .dsd XML must be UTF-8"),
+                ));
+            }
             self.pos = end + 2;
         } else if self.starts_with("<!DOCTYPE") || self.starts_with("<!ENTITY") {
             return Err(Error::new(ErrorCode::InvalidXml, "DOCTYPE/entity declarations are not allowed in .dsd XML"));
@@ -396,6 +419,9 @@ impl Parser<'_> {
                     } else {
                         let id = self.start_tag(Some(top))?;
                         if !self.nodes[id].empty_tag {
+                            if stack.len() >= MAX_DEPTH {
+                                return Err(self.err(self.nodes[id].start, "elements are nested too deeply"));
+                            }
                             stack.push(id);
                         }
                     }
