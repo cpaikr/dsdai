@@ -108,6 +108,11 @@ TABLE (ACLASS NORMAL|EXTRACTION|FINANCE, WIDTH, BORDER 0|1, AFIXTABLE Y|N)
   and `AUNITVALUE` the machine value (dates as `YYYYMMDD`; codes such as
   `PB_TYPE=1`), with `AUNIT` naming the kind. Keep `AUNITVALUE` in step with
   the text; it is empty in some forms.
+- The currency-unit cell (`AUNIT="WON"`, text like `(단위 : 천원)`) stores a
+  code, not a multiplier: `1` = 원, `2` = 천원, `3` = 백만원. No other code
+  has been observed. `set-cell` refuses, and `check` warns with
+  `unit-value`, when the code is unknown or disagrees with the unit the text
+  names.
 - Forms that state the reporting period twice (cover and the attached
   statements' title) write the second copy as `PERIODFROM2`/`PERIODTO2`; in
   every observed file it holds the same dates as `PERIODFROM`/`PERIODTO`.
