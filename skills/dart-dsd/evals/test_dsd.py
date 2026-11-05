@@ -293,6 +293,13 @@ class EditTests(DsdTestCase):
         code, _, err = run(*args, "--unit-value", "2", "-o", str(self.out("c.dsd")))
         self.assertEqual(code, 0, err)
         self.assertIn('AUNITVALUE="2"', contents_of(self.out("c.dsd")))
+        # 원 inside a word is not the unit; the labelled unit decides.
+        code, _, err = run("set-cell", str(variant), "--table", "1", "--row", "2", "--col", "2",
+                           "--text", "직원 (단위 : 천원)", "--unit-value", "2", "-o", str(self.out("d.dsd")))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(dsd._won_text_unit("원화 금액 (단위 : 백만원)"), "백만원")
+        self.assertEqual(dsd._won_text_unit("직원수"), "")
+        self.assertEqual(dsd._won_text_unit("금액 천원"), "천원")
         # A hand edit that changes only the text is caught by check.
         stale = self._with_contents(xml.replace("(단위 : 원)", "(단위 : 백만원)"), "stale.dsd")
         code, out, _ = run("check", str(stale), "--no-schema")

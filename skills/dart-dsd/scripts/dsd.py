@@ -873,7 +873,20 @@ DATE_UNITS_RE = re.compile(r"(DT|DATE|PERIODFROM|PERIODTO)")
 # Observed: the currency-unit TU (AUNIT=WON) stores a code, not the
 # multiplier, so "1000" for 천원 is wrong even though it looks plausible.
 CODED_UNITS: Dict[str, Dict[str, str]] = {"WON": {"1": "원", "2": "천원", "3": "백만원"}}
-WON_TEXT_RE = re.compile(r"(백만|천|만)?원")
+# A whole unit token: 원 inside a word (직원, 원화) is not a unit.
+WON_TEXT_RE = re.compile(r"(?<![가-힣])(?:백만|천|만)?원(?![가-힣])")
+
+
+def _won_text_unit(text: str) -> str:
+    """The currency unit the text names, preferring the one after a 단위 label."""
+    # Match on the original spacing: removing it would glue words together
+    # (금액 천원 -> 금액천원) and defeat the word-boundary rule.
+    label = text.find("단위")
+    for scope in ([text[label:]] if label >= 0 else []) + [text]:
+        m = WON_TEXT_RE.search(scope)
+        if m:
+            return m.group(0)
+    return ""
 
 
 def _unit_value_conflict(aunit: str, text: str, value: str) -> Optional[str]:
@@ -896,8 +909,7 @@ def _unit_value_conflict(aunit: str, text: str, value: str) -> Optional[str]:
     known = ", ".join(f"{code}={name}" for code, name in codes.items())
     if value not in codes:
         return f"AUNIT={aunit} takes a code ({known}), not {value!r}"
-    m = WON_TEXT_RE.search(re.sub(r"\s", "", text))
-    shown = m.group(0) if m else ""
+    shown = _won_text_unit(text)
     if shown in codes.values() and shown != codes[value]:
         code = next(c for c, name in codes.items() if name == shown)
         return f"text shows {shown} (code {code}) but AUNITVALUE is {value} ({codes[value]})"
@@ -905,6 +917,7 @@ def _unit_value_conflict(aunit: str, text: str, value: str) -> Optional[str]:
 
 
 def _unit_issues(doc: Doc, table: Table, cell: Cell) -> List[Issue]:
+    """Warn when a TU cell's AUNITVALUE disagrees with its text (see _unit_value_conflict)."""
     node = cell.node
     if node.tag != "TU":
         return []
@@ -1036,6 +1049,7 @@ def op_set_cell(
     unit_value: Optional[str] = None,
     flatten: bool = False,
 ) -> Tuple[bytes, str]:
+    """Replace one cell's text, keeping its wrapper; refuse ambiguous or unit-inconsistent edits."""
     doc = Doc(data)
     table = doc.table(table_no)
     # Coordinates come from the whole table's structure, so check all of it.
