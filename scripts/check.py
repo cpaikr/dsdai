@@ -93,7 +93,7 @@ def run_cargo() -> None:
         ["test", "--workspace", "--all-features", "--locked"],
     ):
         proc = subprocess.run(["cargo", *args], cwd=ROOT)
-        label = " ".join(a for a in args[:2] if a != "--workspace")
+        label = args[0] + (" --all-features" if "--all-features" in args else "")
         if proc.returncode != 0:
             fail(f"cargo {label}")
         else:

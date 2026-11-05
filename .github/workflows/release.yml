@@ -107,10 +107,12 @@ jobs:
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
         run: |
           set -euo pipefail
-          # A maintainer PR run on this head commit, or a maintainer dispatch on main.
+          # A maintainer dispatch on main, as in darty. PR runs are not accepted:
+          # GitHub merges rewrite SHAs, and a run whose gated jobs were all
+          # skipped must never count as validation.
           CI_RUN_ID="$(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SOURCE_SHA}&status=success&per_page=100" \
-              --jq ".workflow_runs[] | select(.head_sha == \"${SOURCE_SHA}\" and .conclusion == \"success\" and .actor.login == \"sjunepark\" and .triggering_actor.login == \"sjunepark\" and ((.event == \"workflow_dispatch\" and .head_branch == \"main\") or .event == \"pull_request\")) | .id" |
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SOURCE_SHA}&event=workflow_dispatch&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"${SOURCE_SHA}\" and .conclusion == \"success\" and .actor.login == \"sjunepark\" and .triggering_actor.login == \"sjunepark\" and .event == \"workflow_dispatch\" and .head_branch == \"main\") | .id" |
               head -n 1
           )"
           if [ -z "$CI_RUN_ID" ]; then

@@ -179,7 +179,9 @@ a command. The cache is disposable and lives in `%LOCALAPPDATA%\dsd\cache` on
 Windows, `~/Library/Caches/dsd` on macOS, and `$XDG_CACHE_HOME/dsd` or
 `~/.cache/dsd` on Linux; set `DSD_CACHE_DIR` to an absolute path to override
 it. Set `DSD_NO_UPDATE_CHECK=1` to disable all release checks, including
-`version --check`. Release checks never install anything.
+`version --check`; do so in sandboxes without network access or a writable
+cache, where every command would otherwise report `update_check_unavailable`.
+Release checks never install anything.
 
 The installers write `.dsd-receipt.json` beside the executable, recording its
 version, target, path, release, and SHA-256 digest. Keep it there; it lets the

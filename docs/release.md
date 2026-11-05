@@ -127,10 +127,10 @@ tag or reuse a published version.
 
 ## Releasing
 
-1. **Candidate run.** Dispatch Release with an empty tag on the branch to
-   release from. It builds and certifies every target and uploads the bundle
-   as the `dsd-release` workflow artifact, without creating a tag or release.
-   Review the artifact.
+1. **Candidate run.** Dispatch Release with an empty tag on `main` (or another
+   branch via `--ref <branch>`). It builds and certifies every target and
+   uploads the bundle as the `dsd-release` workflow artifact, without creating
+   a tag or release. Review the artifact.
 
    ```sh
    gh workflow run release.yml --repo cpaikr/dsdai --ref main
@@ -140,10 +140,15 @@ tag or reuse a published version.
    `cargo update -w` so `Cargo.lock` follows, update the README's release
    status line, and run `python scripts/check.py`. Merge after CI succeeds.
 
-3. **Exact-commit CI.** Release requires a successful maintainer CI run whose
-   head SHA is the tagged commit: either the PR run on that commit (when it
-   landed on `main` unchanged, as with a fast-forward or rebase) or a dispatch
-   on `main`. After a merge commit, dispatch CI on `main` and wait for success.
+3. **Exact-commit CI.** Release requires a successful CI run dispatched by
+   `sjunepark` on `main` whose head SHA is the tagged commit. PR runs do not
+   count: GitHub's merge and rebase merges create new SHAs, and a PR run whose
+   gated jobs were skipped must never pass as validation. Dispatch CI on
+   `main` after the version commit lands and wait for success:
+
+   ```sh
+   gh workflow run ci.yml --repo cpaikr/dsdai --ref main
+   ```
 
 4. **Tag.** Verify the tag is unused remotely, then create and push only it:
 
@@ -168,7 +173,8 @@ tag or reuse a published version.
    ```
 
    The metadata job refuses a tag that is not stable `vX.Y.Z`, does not exist
-   remotely, is not on `main`, lacks exact-commit CI success, or disagrees with
+   remotely, is not on `main`, lacks a successful CI dispatch on `main` for its
+   exact commit, or disagrees with
    the Cargo version. Every later job checks out the tag's commit. After
    native certification and bundle assembly, the publisher rechecks the tag,
    validates the bundle against the checkout, creates a draft with generated
