@@ -156,7 +156,7 @@ name, replace only the member bytes through `extract`/`pack`.
 
 ## Verified coverage
 
-The helper's rules were checked against real Dart3 and Dart4 DART Editor
+The CLI's rules were checked against real Dart3 and Dart4 DART Editor
 output and the synthetic test fixture. These elements occur there and are
 treated as verified:
 
@@ -169,13 +169,13 @@ treated as verified:
 
 Verified by schema equivalence: these elements have not been observed, but
 both DART schemas give them the same content model and attributes as an
-observed element that the helper handles by the same rule:
+observed element that the CLI handles by the same rule:
 
 `SECTION-4` `SECTION-5` `SECTION-6` `SECTION-7` `TFOOT`
 
 `SECTION-4` to `SECTION-6` match `SECTION-2`, and `SECTION-7` matches it
 except that it allows no deeper section. `TFOOT` matches `TBODY`. The
-helper's tests re-check this against the installed schemas. **Inferred:**
+CLI's tests re-check this against the installed schemas. **Inferred:**
 DART Editor's `ATOCID` numbering in sections this deep is unobserved, so add
 deep sections through the text route and keep `check`'s TOC warnings clean.
 
@@ -187,7 +187,7 @@ between their text and attributes are unknown. Documents from before
 
 When a document contains one of these, or declares another schema:
 
-- Treat the helper's rendering of it as text only, and read the raw XML at
+- Treat the CLI's rendering of it as text only, and read the raw XML at
   the reported line before relying on its meaning.
 - Edit it with `extract` → edit `contents.xml` → `pack`. Copy the pattern of
   a neighboring instance of the same element when one exists rather than
@@ -198,9 +198,9 @@ When a document contains one of these, or declares another schema:
 
 Verifying a new element means testing `read`, `table`, and the edit commands
 on a real document that uses it, then adding it to `OBSERVED_TAGS` in
-`scripts/dsd.py` with a test. Schema equivalence (`SCHEMA_EQUIVALENT_TAGS`)
+the CLI's `crates/dsd/src/doc.rs` with a test. Schema equivalence (`SCHEMA_EQUIVALENT_TAGS`)
 applies only when the content model and attributes match an observed
-element exactly and the helper already handles both with the same code.
+element exactly and the CLI already handles both with the same code.
 
 ## Manual edit recipes
 

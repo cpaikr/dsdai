@@ -4,7 +4,7 @@
     {
       "id": 1,
       "prompt": "fixtures/public/sample.dsd 내용을 읽기 좋은 마크다운으로 만들어 줘.",
-      "hard_because": "Generic unzip shows mojibake image names and raw XML; &cr; tokens, editor comments, and span tables need DSD-specific handling, and the helper deliberately emits no Markdown.",
+      "hard_because": "Generic unzip shows mojibake image names and raw XML; &cr; tokens, editor comments, and span tables need DSD-specific handling, and the CLI deliberately emits no Markdown.",
       "expected_output": "Runs inspect/outline, then read and table for each T#, and writes sample.md beside the source itself. Headings follow SECTION-n levels, the rowspan/colspan shareholder table keeps its spans (for example as HTML), &cr; becomes a line break, figures and spacing are copied from read/table output, ◆click◆ scaffolding is omitted, and the image is written out from extract if it is linked. Does not upload or paste the full document elsewhere."
     },
     {
@@ -39,9 +39,15 @@
     },
     {
       "id": 7,
-      "prompt": "T5 3행 금액을 2,500,000으로 바꾼 사본 만들어 줘. (set-cell exits with a Python traceback on this file.)",
-      "hard_because": "The helper defect must be worked around without abandoning the edit, and the public issue must not leak the confidential document.",
-      "expected_output": "Completes the edit by the extract/pack route and verifies it with check and diff, then in the report offers a GitHub issue for cpaikr/dsdai: searches existing issues, drafts a title and body with placeholder paths, the traceback minus document text, versions from inspect and dsd.py --version, and an invented reproduction fragment, and files it with gh only after the user approves."
+      "prompt": "T5 3행 금액을 2,500,000으로 바꾼 사본 만들어 줘. (dsd set-cell crashes on this file.)",
+      "hard_because": "The CLI defect must be worked around without abandoning the edit, and the public issue must not leak the confidential document.",
+      "expected_output": "Completes the edit by the extract/pack route and verifies it with check and diff, then in the report offers a GitHub issue for cpaikr/dsdai: searches existing issues, drafts a title and body with placeholder paths, the error code and message minus document text, versions from inspect and dsd --version, and an invented reproduction fragment, and files it with gh only after the user approves."
+    },
+    {
+      "id": 8,
+      "prompt": "sample.dsd 읽어줘. (dsd 명령이 없다고 나와요.)",
+      "hard_because": "The executable is missing; installation must follow the published guide without inventing commands, then the original task must resume.",
+      "expected_output": "Reads references/installation.md, installs dsd from the public GitHub Release with the guide's verified installer (or asks for release files when offline), verifies dsd --version by full path and by name, then completes the reading task. Does not treat later update advisories as an upgrade request."
     }
   ]
 }

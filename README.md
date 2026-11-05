@@ -1,57 +1,72 @@
 # dsdai
 
-Agent skill for reading and editing Korean DART Editor `.dsd` documents.
+`dsd` reads, checks, and surgically edits Korean DART Editor `.dsd` documents
+(감사보고서, 검토보고서, 사업·분기·반기보고서 drafts), and the `dart-dsd` agent
+skill teaches an agent to use it. Edits replace exact byte ranges of
+`contents.xml` and rewrite the archive with DART Editor's original member
+order, CP949 name bytes, flags, and timestamps; untouched members keep their
+compressed bytes, so an unchanged `extract`/`pack` round trip is byte-identical.
+DART Editor stays the authority for layout and filing.
 
 | Path | Purpose |
 |---|---|
-| [skills/dart-dsd/](skills/dart-dsd/SKILL.md) | The skill: workflow, [format reference](skills/dart-dsd/references/format.md), and the `scripts/dsd.py` helper |
-| `fixtures/public/sample.dsd` | Synthetic fixture built from `fixtures/public/sample/` by the Rust tests (`DSD_UPDATE_FIXTURES=1 cargo test` rewrites it) |
+| [skills/dart-dsd/](skills/dart-dsd/SKILL.md) | The agent skill: routing, [reading](skills/dart-dsd/references/reading.md), [editing](skills/dart-dsd/references/editing.md), [format reference](skills/dart-dsd/references/format.md) |
+| [crates/dsd](crates/dsd/) | The format library |
+| [crates/dsd-cli](crates/dsd-cli/) | The `dsd` executable |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Boundaries, invariants, and the process contract |
+| [docs/release.md](docs/release.md) | Release runbook |
+| `fixtures/public/` | Synthetic fixture; `sample.dsd` is built from `sample/` by the Rust tests (`DSD_UPDATE_FIXTURES=1 cargo test` rewrites it) |
 | `fixtures/private/` | Git-ignored real samples and DART schemas for local checks only |
 
-## Helper
+## Commands
 
-`skills/dart-dsd/scripts/dsd.py` is a single standard-library Python 3.9+
-script:
+- **Read:** `inspect` (no document text), `outline`, `read` (exact text of
+  every block), `table` (cells with `R#`/`C#`), `find`
+- **Edit:** `set-cell`, `replace`, `copy-row`, `delete-row`, `apply` (JSON
+  batch), and `extract`/`pack` for hand edits of `contents.xml`
+- **Verify:** `check` (structure, images, TOC, table grids, unit values, and
+  validation against an installed DART schema), `diff`
+- **Maintain:** `version [--check]`, `upgrade [--check]`
 
-- **Read:** `inspect`, `outline`, `read` (exact text view), `table`, `find`
-- **Edit:** `set-cell`, `replace`, `copy-row`, `delete-row`, `apply`
-  (JSON batch), and `extract`/`pack` for hand edits
-- **Verify:** `check` (structure, images, TOC, table grids, optional XSD via
-  `lxml`), `diff`
+Every command prints one JSON object to stdout,
+`{ok, command, result, warnings, error, metadata}`, and exits 0 on success,
+1 on failure (including `check` finding errors), or 2 for an invalid
+invocation. `outline`, `read`, `table`, `find`, and `diff` also take
+`--format text` for a compact listing. `dsd --help` and `dsd <command> --help`
+document every option.
 
-Edits replace exact byte ranges in `contents.xml` and rewrite the ZIP with the
-original member order, CP949 name bytes, flags, and timestamps; untouched
-members keep their original compressed bytes. An unchanged `extract`/`pack`
-round trip is byte-identical on real DART Editor files.
+```sh
+dsd find report.dsd 현금및현금성자산 --format text
+dsd set-cell report.dsd -o report_수정.dsd --table 3 --row 4 --col 2 --text 1,100,000
+dsd check report_수정.dsd --against report.dsd
+dsd diff report.dsd report_수정.dsd --format text
+```
 
-## Rust CLI (in progress)
+Schema validation reads the DART schema installed with DART Editor
+(`C:\DART\Resource\Dtd`, or `--schema-dir` / `DART_SCHEMA_DIR`); the tool
+ships no schema text. `.dsd` files are usually unreleased client filings:
+`dsd` works locally and never uploads them; its only network use is the
+release check described under [Updates](#updates).
 
-The `dsd` command-line tool in `crates/` is replacing the Python helper:
-`crates/dsd` is the library and `crates/dsd-cli` the executable. It keeps the
-helper's commands and byte-preservation rules, prints one JSON envelope per
-invocation (`--format text` gives the helper's compact listings), and adds
-dependency-free validation against an installed DART schema. Until it is
-released and the skill moves to it, the skill keeps using `scripts/dsd.py`;
-`scripts/parity.py` compares the two implementations.
+## Development
 
-## Checks
-
-```bash
+```sh
 python scripts/check.py
 ```
 
 Validates the skill package, runs `cargo fmt`, `clippy`, and the Rust tests
-(including the public fixture's freshness against `fixtures/public/sample/`),
-runs the Python unit tests, and, when `fixtures/private/` exists, runs
-check/read/outline and a byte-identical round trip over each private sample
-without printing document content.
+(with the test-only `fixture-origin` feature for release-check and upgrade
+tests), the release tooling's unit tests, and a CLI smoke run (check, complete
+read, outline, byte-identical extract/pack) over the public fixture and, when
+`fixtures/private/` exists, each private sample without printing document
+content. Building needs Rust 1.88 or newer; `cargo build --release -p dsd-cli`
+produces `target/release/dsd`.
 
 ## Installation
 
 > **Not yet available.** These instructions apply from the first release,
 > v0.1.0, which has not been published. Until then there is no `dsd` release
-> to download; build from a checkout with `cargo build --release -p dsd-cli`
-> or use `skills/dart-dsd/scripts/dsd.py`.
+> to download; build from a checkout with `cargo build --release -p dsd-cli`.
 
 Download the archive for your platform, `SHA256SUMS`, and the matching
 installer from the same [GitHub Release](https://github.com/cpaikr/dsdai/releases).
@@ -215,7 +230,9 @@ same release in this repository.
 
 ### Agent skill
 
-Install the skill from the published `skills/` subpath, like the skills in
-`../agent-scripts`; this repository's own `.agents/skills/` and
-`.claude/skills/` placements are generated by `sjskills` from
-`sjskills.toml`.
+The skill is separate from the executable. Install `skills/dart-dsd/` from
+this repository's published `skills/` subpath with your agent's skill
+installer (for example `sjskills`); it needs a working `dsd` on `PATH` and
+routes to this guide when one is missing. This repository's own
+`.agents/skills/` and `.claude/skills/` placements are generated by `sjskills`
+from `sjskills.toml`.

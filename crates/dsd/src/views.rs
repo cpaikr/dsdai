@@ -818,3 +818,22 @@ pub fn inspect(arc: &Archive) -> Result<Inspection> {
     });
     Ok(Inspection { file: arc.file_name(), bytes, members, meta, document, issues })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_view_rules_cover_only_verified_elements() {
+        let ruled = TEXT_VIEW_TAGS
+            .iter()
+            .chain(&REGION_TAGS)
+            .chain(&TRANSPARENT_TAGS)
+            .chain(&OTHER_CONTAINER_TAGS)
+            .chain(&INLINE_TAGS)
+            .chain(&["TABLE", "PGBRK"]);
+        for tag in ruled {
+            assert!(is_verified(tag), "{tag}");
+        }
+    }
+}
