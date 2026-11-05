@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -321,6 +322,117 @@ class PackTests(DsdTestCase):
         code, _, err = run("pack", str(work), str(self.src), "-o", str(self.out()))
         self.assertEqual(code, 1)
         self.assertIn("BOM", err)
+
+
+class UnverifiedContentTests(DsdTestCase):
+    """Elements and schemas never seen in real DART output are flagged, never guessed at."""
+
+    def _note_variant(self) -> Path:
+        xml = contents_of(self.src).replace("<P>1. 일반사항</P>", "<NOTE><P>1. 일반사항</P></NOTE>")
+        return self._with_contents(xml, "note.dsd")
+
+    def _emphasis_in_table(self) -> Path:
+        cell = '<TD HEIGHT="23" VALIGN="MIDDLE" WIDTH="247">Ⅰ.유동자산</TD>'
+        self.assertIn(cell, contents_of(self.src))
+        xml = contents_of(self.src).replace(cell, cell.replace(">Ⅰ.유동자산<", "><EMPHASIS>Ⅰ.유동자산</EMPHASIS><"))
+        return self._with_contents(xml, "emphasis.dsd")
+
+    def test_observed_tags_match_format_reference(self) -> None:
+        text = (HERE.parent / "references" / "format.md").read_text(encoding="utf-8")
+        section = text.split("## Verified coverage", 1)[1].split("The DART schemas also allow", 1)[0]
+        listed = set(re.findall(r"`([A-Za-z][A-Za-z0-9-]*)`", section))
+        self.assertEqual(listed, set(dsd.OBSERVED_TAGS))
+        fixture_tags = set(re.findall(r"<([A-Za-z][A-Za-z0-9-]*)[\s>/]", contents_of(self.src)))
+        self.assertLessEqual(fixture_tags, set(dsd.OBSERVED_TAGS))
+
+    def test_readers_flag_unverified_elements(self) -> None:
+        variant = self._note_variant()
+        code, out, _ = run("check", str(variant), "--no-schema")
+        self.assertEqual(code, 0, out)  # a warning, not an error
+        self.assertIn("unverified-element", out)
+        self.assertIn("<NOTE> x1", out)
+        code, out, _ = run("read", str(variant))
+        self.assertEqual(code, 0)
+        self.assertIn('unverified: ["NOTE"]', out)
+        self.assertRegex(out, r"<!-- dsd:unverified NOTE line=\d+: shown as plain text -->\n\n1\. 일반사항")
+        code, out, _ = run("find", str(variant), "일반사항")
+        self.assertIn("[unverified NOTE]", out)
+        code, out, _ = run("outline", str(variant), "--all")
+        self.assertIn("<NOTE> unverified element", out)
+        code, out, _ = run("table", str(self._emphasis_in_table()), "3")
+        self.assertIn("warning: contains unverified <EMPHASIS>", out)
+
+    def test_edits_refuse_unverified_targets(self) -> None:
+        variant = self._note_variant()
+        code, out, _ = run("replace", str(variant), "--old", "일반사항", "--new", "X", "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("[inside unverified <NOTE>]", out)
+        code, _, err = run("replace", str(variant), "--old", "일반사항", "--new", "X", "-o", str(self.out()))
+        self.assertEqual(code, 1)
+        self.assertIn("not verified", err)
+        self.assertIn("extract -> edit -> pack", err)
+        self.assertFalse(self.out().exists())
+        # Text outside the unverified element is still editable.
+        code, _, err = run("replace", str(variant), "--old", "첫 문단", "--new", "첫째 문단", "-o", str(self.out()))
+        self.assertEqual(code, 0, err)
+
+        table_variant = self._emphasis_in_table()
+        for argv in (
+            ("set-cell", str(table_variant), "--table", "3", "--row", "4", "--col", "2", "--text", "1"),
+            ("copy-row", str(table_variant), "--table", "3", "--row", "4"),
+            ("delete-row", str(table_variant), "--table", "3", "--row", "4"),
+        ):
+            code, _, err = run(*argv, "-o", str(self.out("t.dsd")))
+            self.assertEqual(code, 1, argv)
+            self.assertIn("T3 contains <EMPHASIS>", err)
+        # Other tables in the same document are unaffected.
+        code, _, err = run("set-cell", str(table_variant), "--table", "4", "--row", "3", "--col", "1",
+                           "--text", "X", "-o", str(self.out("t.dsd")))
+        self.assertEqual(code, 0, err)
+
+    def test_edits_refuse_tables_inside_unverified_containers(self) -> None:
+        xml = contents_of(self.src)
+        tail = "</TABLE>\r\n\r\n<IMAGE>"
+        self.assertEqual(xml.count(tail), 1)
+        xml = xml.replace("<P>1. 일반사항</P>", "<P>1. 일반사항</P><NOTE>").replace(tail, "</TABLE></NOTE>\r\n\r\n<IMAGE>")
+        variant = self._with_contents(xml, "note-table.dsd")
+        for argv in (
+            ("set-cell", str(variant), "--table", "4", "--row", "3", "--col", "1", "--text", "X"),
+            ("copy-row", str(variant), "--table", "4", "--row", "3"),
+            ("delete-row", str(variant), "--table", "4", "--row", "3"),
+            ("replace", str(variant), "--old", "홍길동", "--new", "X"),
+        ):
+            code, _, err = run(*argv, "-o", str(self.out("n.dsd")))
+            self.assertEqual(code, 1, argv)
+            self.assertIn("not verified", err)
+        self.assertFalse(self.out("n.dsd").exists())
+
+    def test_unverified_schema_blocks_edits(self) -> None:
+        xml = contents_of(self.src).replace('noNamespaceSchemaLocation="dart4.xsd"', 'noNamespaceSchemaLocation="dart9.xsd"')
+        variant = self._with_contents(xml, "schema.dsd")
+        code, out, _ = run("check", str(variant), "--no-schema")
+        self.assertIn("unverified-schema", out)
+        code, out, _ = run("read", str(variant))
+        self.assertIn('unverified: ["schema dart9.xsd"]', out)
+        code, _, err = run("set-cell", str(variant), "--table", "3", "--row", "4", "--col", "2",
+                           "--text", "1", "-o", str(self.out()))
+        self.assertEqual(code, 1)
+        self.assertIn("schema dart9.xsd", err)
+        code, _, err = run("replace", str(variant), "--old", "첫 문단", "--new", "X", "-o", str(self.out()))
+        self.assertEqual(code, 1)
+        self.assertIn("schema dart9.xsd", err)
+
+    def test_raw_route_handles_unverified_elements(self) -> None:
+        variant = self._note_variant()
+        work = self.dir / "work"
+        self.assertEqual(run("extract", str(variant), str(work))[0], 0)
+        xml = (work / "contents.xml").read_bytes()
+        (work / "contents.xml").write_bytes(xml.replace("<P>1. 일반사항</P>".encode(), "<P>1. 일반 사항</P>".encode()))
+        code, out, err = run("pack", str(work), str(variant), "-o", str(self.out()))
+        self.assertEqual(code, 0, err + out)
+        self.assertIn("<NOTE><P>1. 일반 사항</P></NOTE>", contents_of(self.out()))
+        code, out, _ = run("diff", str(variant), str(self.out()))
+        self.assertIn("일반 사항", out)
 
 
 class SafetyTests(DsdTestCase):

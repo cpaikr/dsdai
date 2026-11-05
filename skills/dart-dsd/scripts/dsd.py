@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 CONTENTS = "contents.xml"
 META = "meta.xml"
@@ -40,6 +40,22 @@ CELL_TAGS = ("TH", "TD", "TE", "TU")
 ROW_SECTIONS = ("THEAD", "TBODY", "TFOOT")
 SCAFFOLD_TAGS = ("COMMENT", "LIBRARYLIST", "FILENAME")  # editor-only, never printed
 BLOCK_TEXT_TAGS = ("P", "TITLE", "COVER-TITLE", "IMG-CAPTION", "WARNING", "SUBTITLE")
+# Elements and schemas seen in real DART Editor output (listed with the unseen
+# remainder in references/format.md). Every rule in this helper was checked
+# only against these. Anything else is copied through byte for byte, but the
+# helper does not guess at its meaning: check/inspect warn, read/outline/table/
+# find mark it, and the edit commands refuse to touch it, leaving such edits to
+# the extract -> text edit -> pack route. Add a tag only after verifying the
+# helper's rendering and edits on a real document that uses it.
+OBSERVED_TAGS = frozenset({
+    "A", "APPENDIX", "BODY", "COL", "COLGROUP", "COMMENT", "COMPANY-NAME", "COVER", "COVER-TITLE",
+    "DOCUMENT", "DOCUMENT-HEADER", "DOCUMENT-NAME", "EXTRACTION", "FILENAME", "FORMULA-VERSION",
+    "IMAGE", "IMG", "IMG-CAPTION", "INSERTION", "LIBRARY", "LIBRARYLIST", "P", "PART", "PGBRK",
+    "SECTION-1", "SECTION-2", "SECTION-3", "SPAN", "SUMMARY", "TABLE", "TABLE-GROUP", "TBODY",
+    "TD", "TE", "TH", "THEAD", "TITLE", "TOC", "TR", "TU", "WARNING",
+})
+OBSERVED_SCHEMAS = ("dart3.xsd", "dart4.xsd")
+RAW_ROUTE = "edit contents.xml as text instead (extract -> edit -> pack, then check --against and diff)"
 MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
 MAX_MEMBER_BYTES = 200 * 1024 * 1024
 MAX_MEMBERS = 2000
@@ -553,6 +569,7 @@ class Block:
     text: str
     line: int
     attrs: Tuple[Tuple[str, str], ...] = ()
+    unverified: Tuple[str, ...] = ()  # unverified tags in or around this block
 
     def attr_text(self) -> str:
         return " ".join(f'{k}="{v}"' for k, v in self.attrs)
@@ -562,12 +579,13 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
     """Readable units in document order: table cells and free text blocks."""
     table_by_node = {t.node: t for t in doc.tables}
 
-    def walk(node: Node) -> Iterator[Block]:
+    def walk(node: Node, outer: Tuple[str, ...]) -> Iterator[Block]:
         for child in node.children:
             if child.tag in SCAFFOLD_TAGS or child.tag == "DOCUMENT-HEADER":
                 continue
             if child.tag == "TABLE":
                 table = table_by_node[child]
+                around = tuple(sorted(set(outer) | set(unverified_tags(child))))
                 for cell in table.cells:
                     yield Block(
                         f"T{table.index}R{cell.row}C{cell.col}",
@@ -575,6 +593,7 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                         node_text(cell.node),
                         doc.line(cell.node.start),
                         tuple(sorted(cell.node.attrs.items())),
+                        around,
                     )
             elif child.tag in BLOCK_TEXT_TAGS:
                 yield Block(
@@ -583,11 +602,13 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                     node_text(child),
                     doc.line(child.start),
                     tuple(sorted(child.attrs.items())),
+                    tuple(sorted(set(outer) | set(unverified_tags(child)))),
                 )
             else:
-                yield from walk(child)
+                inner = outer if child.tag in OBSERVED_TAGS else tuple(sorted(set(outer) | {child.tag}))
+                yield from walk(child, inner)
 
-    yield from walk(doc.root)
+    yield from walk(doc.root, ())
 
 
 # --------------------------------------------------------------------------
@@ -635,6 +656,34 @@ def img_refs(doc: Doc) -> List[str]:
     return [node_text(n) for n in doc.root.iter("IMG")]
 
 
+def unverified_tags(node: Node) -> List[str]:
+    """Tags in `node`'s subtree (itself included) outside OBSERVED_TAGS."""
+    return sorted({n.tag for n in node.iter() if n.tag not in OBSERVED_TAGS})
+
+
+def unverified_schema(doc: Doc) -> Optional[str]:
+    """The declared schema when it is not one the helper was verified on."""
+    schema = header_info(doc)["schema"]
+    return None if schema.lower() in OBSERVED_SCHEMAS else (schema or "(none declared)")
+
+
+def _require_verified(doc: Doc, node: Node, where: str) -> None:
+    """Refuse an edit whose interpretation depends on unverified structure."""
+    schema = unverified_schema(doc)
+    if schema:
+        raise DsdError(f"document schema {schema} is not one this helper was verified on; {RAW_ROUTE}")
+    tags = unverified_tags(node)
+    if tags:
+        names = ", ".join(f"<{t}>" for t in tags)
+        raise DsdError(f"{where} contains {names}, which this helper has not verified; {RAW_ROUTE}")
+    # An unverified container may change what the target means (as replace and
+    # find already assume), so its ancestors count too.
+    outer = sorted({a.tag for a in node.ancestors() if a.tag not in OBSERVED_TAGS})
+    if outer:
+        names = ", ".join(f"<{t}>" for t in outer)
+        raise DsdError(f"{where} lies inside {names}, which this helper has not verified; {RAW_ROUTE}")
+
+
 def check_archive(arc: Archive) -> Tuple[List[Issue], Optional[Doc]]:
     issues: List[Issue] = []
     names = [m.name for m in arc.members]
@@ -664,6 +713,23 @@ def check_archive(arc: Archive) -> Tuple[List[Issue], Optional[Doc]]:
         issues.append(Issue("error", "meta-xml", str(exc)))
         meta = None
     head = header_info(doc)
+    schema = unverified_schema(doc)
+    if schema:
+        issues.append(Issue(
+            "warning", "unverified-schema",
+            f"schema {schema} is not one this helper was verified on ({', '.join(OBSERVED_SCHEMAS)});"
+            " edit commands refuse this file",
+        ))
+    unseen: Dict[str, List[Node]] = {}
+    for node in doc.root.iter():
+        if node.tag not in OBSERVED_TAGS:
+            unseen.setdefault(node.tag, []).append(node)
+    for tag, nodes in sorted(unseen.items()):
+        issues.append(Issue(
+            "warning", "unverified-element",
+            f"<{tag}> x{len(nodes)}, first at line {doc.line(nodes[0].start)}: not seen in verified DART output;"
+            " read shows it as plain text and edit commands refuse to touch it",
+        ))
     if meta is not None:
         gen = meta.find("GENERATOR")
         meta_schema = gen.get("schema", "") if gen is not None else ""
@@ -882,6 +948,8 @@ def op_set_cell(
 ) -> Tuple[bytes, str]:
     doc = Doc(data)
     table = doc.table(table_no)
+    # Coordinates come from the whole table's structure, so check all of it.
+    _require_verified(doc, table.node, f"T{table_no}")
     cell = cell_at(table, row, col)
     node = cell.node
     note = ""
@@ -1031,9 +1099,19 @@ def op_replace(
                 return f" [TU AUNITVALUE={c.node.attrs['AUNITVALUE']} is not changed by replace]"
         return ""
 
-    notes = [unit_note(a) for a, _, _ in hits]
+    unverified = [n for n in root.iter() if n.tag not in OBSERVED_TAGS]
+
+    def unverified_note(offset: int) -> str:
+        tags = sorted({n.tag for n in unverified if n.open_end <= offset < n.close_start})
+        return f" [inside unverified {', '.join(f'<{t}>' for t in tags)}]" if tags else ""
+
+    flagged = [unverified_note(a) for a, _, _ in hits]
+    notes = [unit_note(a) + f for (a, _, _), f in zip(hits, flagged)]
+    schema = unverified_schema(doc)
     if dry_run:
         lines = [f"{len(hits)} occurrence(s) of {old!r} in {scope}"]
+        if schema:
+            lines.append(f"  note: schema {schema} is unverified; replace will refuse this file")
         for (a, b, _), note in list(zip(hits, notes))[:200]:
             lo, hi = max(0, a - 40), min(len(data), b + 40)
             ctx = data[lo:hi].decode("utf-8", "ignore").replace("\r", "").replace("\n", "⏎")
@@ -1050,9 +1128,17 @@ def op_replace(
             f"found {len(hits)} occurrence(s) of {old!r} in {scope}, expected {expect} (lines {lines});"
             " narrow with --table, or set --expect to the verified count"
         )
+    if schema:
+        raise DsdError(f"document schema {schema} is not one this helper was verified on; {RAW_ROUTE}")
+    inside = [doc.line(a) for (a, _, _), f in zip(hits, flagged) if f]
+    if inside:
+        raise DsdError(
+            f"{len(inside)} occurrence(s) lie inside elements this helper has not verified (lines {inside[:15]});"
+            f" {RAW_ROUTE}"
+        )
     lines = sorted({doc.line(h[0]) for h in hits})
     msg = f"replaced {len(hits)} occurrence(s) of {old!r} with {new!r} at lines {lines[:20]}"
-    tu_hits = sum(1 for n in notes if n)
+    tu_hits = sum(1 for a, _, _ in hits if unit_note(a))
     if tu_hits:
         msg += f"\n  note: {tu_hits} occurrence(s) were in TU cells; their AUNITVALUE was left as is (use set-cell --unit-value)"
     return _replace_ranges(data, hits), msg
@@ -1081,6 +1167,7 @@ def op_copy_row(
         raise DsdError("--count must be at least 1")
     doc = Doc(data)
     table = doc.table(table_no)
+    _require_verified(doc, table.node, f"T{table_no}")
     if not 1 <= row <= len(table.rows):
         raise DsdError(f"T{table_no} has rows 1..{len(table.rows)}")
     tr = table.rows[row - 1]
@@ -1120,6 +1207,7 @@ def op_copy_row(
 def op_delete_row(data: bytes, table_no: int, row: int, force: bool = False) -> Tuple[bytes, str]:
     doc = Doc(data)
     table = doc.table(table_no)
+    _require_verified(doc, table.node, f"T{table_no}")
     if not 1 <= row <= len(table.rows):
         raise DsdError(f"T{table_no} has rows 1..{len(table.rows)}")
     tr = table.rows[row - 1]
@@ -1258,6 +1346,13 @@ class MarkdownRenderer:
             tag = item.tag
             if tag in SCAFFOLD_TAGS or tag == "DOCUMENT-HEADER":
                 continue
+            # Leaves render their whole subtree; containers are walked, so they
+            # mark only themselves and their children mark the rest.
+            leaf = tag in ("TITLE", "COVER-TITLE", "P", "SUBTITLE", "TABLE", "IMAGE", "WARNING")
+            unseen = unverified_tags(item) if leaf else ([tag] if tag not in OBSERVED_TAGS else [])
+            if unseen:
+                names = ",".join(unseen).replace("--", "- -")
+                self.emit(f"<!-- dsd:unverified {names} line={self.doc.line(item.start)}: shown as plain text -->")
             if tag == "TITLE":
                 text = " ".join(node_text(item).split())
                 if item.parent is not None and (item.parent.tag in ("PART",) or item.parent.tag.startswith("SECTION-")):
@@ -1346,6 +1441,12 @@ def front_matter(arc: Archive, doc: Doc) -> str:
         ("images", str(len(arc.images()))),
         ("converter", f"dsd.py {VERSION}"),
     ]
+    unverified = unverified_tags(doc.root)
+    schema = unverified_schema(doc)
+    if schema:
+        unverified.insert(0, f"schema {schema}")
+    if unverified:
+        fields.append(("unverified", unverified))  # type: ignore[arg-type]
     return "---\n" + "\n".join(f"{k}: {json.dumps(v, ensure_ascii=False)}" for k, v in fields) + "\n---\n\n"
 
 
@@ -1437,7 +1538,10 @@ def cmd_outline(args: argparse.Namespace) -> int:
             tag = child.tag
             line = doc.line(child.start)
             pad = "  " * depth
-            if tag in ("PART",) or tag.startswith("SECTION-"):
+            if tag not in OBSERVED_TAGS:
+                _print(f"{line:>7}  {pad}<{tag}> unverified element (contents shown below as found)")
+                walk(child, depth + 1)
+            elif tag in ("PART",) or tag.startswith("SECTION-"):
                 title = next((c for c in child.children if c.tag == "TITLE"), None)
                 name = " ".join(node_text(title).split()) if title is not None else ""
                 _print(f"{line:>7}  {pad}{tag} {name}")
@@ -1492,6 +1596,10 @@ def cmd_table(args: argparse.Namespace) -> int:
             f" ACLASS={n.attrs.get('ACLASS', '')} BORDER={n.attrs.get('BORDER', '')} AFIXTABLE={n.attrs.get('AFIXTABLE', '')}"
             f" COL={table.cols}"
         )
+        unseen = unverified_tags(n)
+        if unseen:
+            _print(f"  warning: contains unverified {', '.join(f'<{t}>' for t in unseen)}; coordinates may not"
+                   " match DART Editor and edit commands refuse this table")
         for ri, tr in enumerate(table.rows, 1):
             flags = f"{tr.parent.tag if tr.parent else ''} ACOPY={tr.attrs.get('ACOPY', '')} ADELETE={tr.attrs.get('ADELETE', '')}"
             _print(f"  R{ri} line={doc.line(tr.start)} {flags}")
@@ -1529,7 +1637,8 @@ def cmd_find(args: argparse.Namespace) -> int:
         if target and target in hay:
             hits += 1
             snippet = " ".join(block.text.split())
-            _print(f"{block.locator:>14}  line={block.line:<6} {block.tag:11} {snippet[:120]}")
+            flag = f" [unverified {','.join(block.unverified)}]" if block.unverified else ""
+            _print(f"{block.locator:>14}  line={block.line:<6} {block.tag:11} {snippet[:120]}{flag}")
             if hits >= args.limit:
                 _print(f"... stopped after {args.limit} matches (raise --limit)")
                 break

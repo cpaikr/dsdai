@@ -144,6 +144,41 @@ decoding: the archive member name, the `IMG` text in `contents.xml`, and an
 DART Editor. When an image must be replaced programmatically with the same
 name, replace only the member bytes through `extract`/`pack`.
 
+## Verified coverage
+
+The helper's rules were checked against real Dart3 and Dart4 DART Editor
+output and the synthetic test fixture. These elements occur there and are
+treated as verified:
+
+`A` `APPENDIX` `BODY` `COL` `COLGROUP` `COMMENT` `COMPANY-NAME` `COVER`
+`COVER-TITLE` `DOCUMENT` `DOCUMENT-HEADER` `DOCUMENT-NAME` `EXTRACTION`
+`FILENAME` `FORMULA-VERSION` `IMAGE` `IMG` `IMG-CAPTION` `INSERTION`
+`LIBRARY` `LIBRARYLIST` `P` `PART` `PGBRK` `SECTION-1` `SECTION-2`
+`SECTION-3` `SPAN` `SUMMARY` `TABLE` `TABLE-GROUP` `TBODY` `TD` `TE` `TH`
+`THEAD` `TITLE` `TOC` `TR` `TU` `WARNING`
+
+The DART schemas also allow elements that have not been observed yet:
+`CAUTION`, `CORRECTION`, `DESCRIPTION`, `EMPHASIS`, `NOTE`, `NOTE-GROUP`,
+`SECTION-4` to `SECTION-7`, `SUBTITLE`, `TFOOT`, and a lowercase
+`section-5`. Their layout conventions and any coupling between their text
+and attributes are unknown. Documents from before `dart3.xsd` (the older DTD
+formats) are also unverified.
+
+When a document contains one of these, or declares another schema:
+
+- Treat the helper's rendering of it as text only, and read the raw XML at
+  the reported line before relying on its meaning.
+- Edit it with `extract` → edit `contents.xml` → `pack`. Copy the pattern of
+  a neighboring instance of the same element when one exists rather than
+  inventing structure.
+- Schema validation in `check` knows every allowed element, so it is the
+  main structural safeguard here. State whether it ran, and recommend
+  checking the result in DART Editor.
+
+Verifying a new element means testing `read`, `table`, and the edit commands
+on a real document that uses it, then adding it to `OBSERVED_TAGS` in
+`scripts/dsd.py` with a test.
+
 ## Manual edit recipes
 
 Use these with `extract` → edit `contents.xml` → `pack`.

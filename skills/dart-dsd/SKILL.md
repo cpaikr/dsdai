@@ -48,6 +48,16 @@ Quote figures from `table` output when precision matters; Markdown collapses
 spacing. Editor guidance (`◆click◆` comments, `LIBRARYLIST`, `WARNING`) and
 unfilled `INSERTION` slots are not document content.
 
+The helper's rules were verified only on elements and schemas seen in real
+DART Editor output. It shows anything else as found but does not interpret
+it: `inspect`/`check` report `unverified-element` or `unverified-schema`,
+Markdown carries `<!-- dsd:unverified … -->` markers and an `unverified`
+front-matter field, `find` tags hits `[unverified …]`, and `table` warns that
+coordinates may not match DART Editor. When such content matters to the
+task, read the raw XML at the reported line (`extract`) and the
+[format reference](references/format.md) before relying on its meaning, and
+tell the user which parts were unverified.
+
 ## Edit
 
 Write every edit to a new file such as `<name>_수정.dsd`. Overwrite the
@@ -56,8 +66,22 @@ replace an existing file without `--force`.
 
 Never re-serialize `contents.xml` with an XML library or re-zip the archive
 with a generic tool. Those rewrite CP949 image names, quoting, empty elements,
-and line endings, which DART Editor may then mis-handle. Use the helper's
-edit commands, or `extract` → change `contents.xml` as text → `pack`.
+and line endings, which DART Editor may then mis-handle. Two routes avoid
+that, and both end in the same verification:
+
+- **Edit commands** (`set-cell`, `replace`, `copy-row`, `delete-row`,
+  `apply`) locate and splice the change for you. They refuse when the edit's
+  meaning depends on something unverified: a table that contains or sits
+  inside an unverified element, a `replace` hit inside one, or a file with an
+  unverified schema.
+- **Text editing**: `extract FILE DIR`, edit `DIR/contents.xml` as text,
+  then `pack DIR FILE -o OUT`. Use it whenever a command refuses or the
+  change is outside the commands' scope (new paragraphs or sections, column
+  or span changes, unverified content). Read the surrounding XML first and
+  follow the format reference's text conventions and size and TOC rules:
+  UTF-8 without BOM, CRLF kept, `&cr;` for line breaks. `pack` restores the
+  original archive layout and refuses structural damage, so this route is as
+  safe for the container as the commands are.
 
 1. **Locate.** Use `find` and `table` to get `T#`/`R#`/`C#` and confirm the
    cell holds what the user means. The same figure often appears in several
@@ -87,10 +111,9 @@ edit commands, or `extract` → change `contents.xml` as text → `pack`.
      "row": 4, "col": 2, "text": "1,100,000"}`). Row numbers in later
      operations refer to the table after earlier operations, so list row
      insertions and deletions bottom-up or account for the shift.
-   - For anything else, such as new paragraphs or sections, column changes,
-     or span changes, `extract FILE DIR`, edit `DIR/contents.xml` as UTF-8
-     without BOM keeping CRLF, follow the format reference's size and TOC
-     rules, then `pack DIR FILE -o OUT`.
+   - For anything else, or when a command refuses, use the text-editing
+     route above. Do not reach for `--flatten` or `--force-locked` just to
+     get past a refusal.
 3. **Match the form's conventions.** Format values like their neighbors:
    thousands separators, `(1,234)` negatives, `-` for nil, leading-space
    indentation, and spacing in titles. A value the user spelled out exactly

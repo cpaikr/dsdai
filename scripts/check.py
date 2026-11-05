@@ -9,6 +9,7 @@ file indexes and counts, never document text or file names.
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -101,7 +102,7 @@ def private_smoke() -> None:
         for i, src in enumerate(files, 1):
             work, out, md = Path(tmp) / f"w{i}", Path(tmp) / f"o{i}.dsd", Path(tmp) / f"m{i}.md"
             steps = [
-                ["check", str(src)],
+                ["check", str(src), "--json"],
                 ["read", str(src), "-o", str(md)],
                 ["outline", str(src)],
                 ["extract", str(src), str(work)],
@@ -112,6 +113,12 @@ def private_smoke() -> None:
                 if proc.returncode != 0:
                     fail(f"private sample #{i}: `{step[0]}` exited {proc.returncode}")
                     break
+                if step[0] == "check":
+                    # Unverified elements or schemas are a prompt to verify the
+                    # helper on this sample and extend OBSERVED_TAGS, not a failure.
+                    for issue in json.loads(proc.stdout):
+                        if issue["code"].startswith("unverified-"):
+                            print(f"note private sample #{i}: {issue['code']} {issue['message'].split(':')[0]}")
             else:
                 if out.read_bytes() != src.read_bytes():
                     fail(f"private sample #{i}: extract/pack round trip is not byte-identical")
