@@ -1,0 +1,19 @@
+[package]
+name = "dsd"
+description = "Byte-preserving reader, checker, and editor for DART Editor .dsd documents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+crc32fast.workspace = true
+encoding_rs.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
