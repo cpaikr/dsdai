@@ -12,6 +12,7 @@ import re
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
@@ -339,11 +340,52 @@ class UnverifiedContentTests(DsdTestCase):
 
     def test_observed_tags_match_format_reference(self) -> None:
         text = (HERE.parent / "references" / "format.md").read_text(encoding="utf-8")
-        section = text.split("## Verified coverage", 1)[1].split("The DART schemas also allow", 1)[0]
-        listed = set(re.findall(r"`([A-Za-z][A-Za-z0-9-]*)`", section))
-        self.assertEqual(listed, set(dsd.OBSERVED_TAGS))
+        coverage = text.split("## Verified coverage", 1)[1]
+        observed, rest = coverage.split("Verified by schema equivalence", 1)
+        equivalent = rest.split("\n\n", 2)[1]  # the tag list paragraph after the intro
+        names = re.compile(r"`([A-Za-z][A-Za-z0-9-]*)`")
+        self.assertEqual(set(names.findall(observed)), set(dsd.OBSERVED_TAGS))
+        self.assertEqual(set(names.findall(equivalent)), set(dsd.SCHEMA_EQUIVALENT_TAGS))
+        self.assertEqual(dsd.VERIFIED_TAGS, dsd.OBSERVED_TAGS | dsd.SCHEMA_EQUIVALENT_TAGS)
         fixture_tags = set(re.findall(r"<([A-Za-z][A-Za-z0-9-]*)[\s>/]", contents_of(self.src)))
         self.assertLessEqual(fixture_tags, set(dsd.OBSERVED_TAGS))
+
+    def test_schema_equivalent_tags_match_installed_schemas(self) -> None:
+        # Reads the locally installed (private, uncommitted) DART schemas at run
+        # time; no schema text or derived values live in the repository.
+        schema_dir = HERE.parents[2] / "fixtures" / "private" / "dart-resource"
+        schemas = sorted(schema_dir.glob("*.xsd")) if schema_dir.is_dir() else []
+        if not schemas:
+            self.skipTest("installed DART schemas absent (fixtures/private/)")
+        xs = "{http://www.w3.org/2001/XMLSchema}"
+        nested_section = re.compile(r"(?i)section-\d+$")
+        pairs = {"SECTION-4": "SECTION-2", "SECTION-5": "SECTION-2", "SECTION-6": "SECTION-2",
+                 "SECTION-7": "SECTION-2", "TFOOT": "TBODY"}
+        self.assertEqual(set(pairs), set(dsd.SCHEMA_EQUIVALENT_TAGS))
+        for path in schemas:
+            root = ET.parse(path).getroot()
+            types = {t.get("name"): t for t in root.iter(xs + "complexType") if t.get("name")}
+            element_type: dict = {}
+            for e in root.iter(xs + "element"):
+                if e.get("name") and e.get("type"):
+                    element_type.setdefault(e.get("name"), e.get("type"))
+
+            def shape(el: ET.Element, top: bool = True) -> object:
+                # Structure and attributes, ignoring annotations, the type's own
+                # name, and the nested section level (its number, or its absence
+                # at the deepest level).
+                if el.tag == xs + "annotation":
+                    return None
+                ident = el.get("name") or el.get("ref") or ""
+                if not top and el.tag == xs + "element" and nested_section.match(ident):
+                    return None
+                attrs = tuple(sorted((k, v) for k, v in el.attrib.items() if not (top and k == "name")))
+                kids = tuple(s for s in (shape(c, False) for c in el) if s is not None)
+                return (el.tag, attrs, kids)
+
+            for tag, base in pairs.items():
+                with self.subTest(schema=path.name, tag=tag):
+                    self.assertEqual(shape(types[element_type[tag]]), shape(types[element_type[base]]))
 
     def test_readers_flag_unverified_elements(self) -> None:
         variant = self._note_variant()
@@ -424,11 +466,38 @@ class UnverifiedContentTests(DsdTestCase):
         self.assertIn("not verified", err)
         self.assertNotIn("expected 3", err)
 
+    def _renamed_section(self, level: int) -> Path:
+        xml = contents_of(self.src).replace("<SECTION-2 ", f"<SECTION-{level} ").replace(
+            "</SECTION-2>", f"</SECTION-{level}>")
+        return self._with_contents(xml, f"section{level}.dsd")
+
     def test_unverified_section_keeps_its_outline_title(self) -> None:
-        xml = contents_of(self.src).replace("<SECTION-2 ", "<SECTION-4 ").replace("</SECTION-2>", "</SECTION-4>")
-        code, out, _ = run("outline", str(self._with_contents(xml, "deep.dsd")))
+        # No schema declares SECTION-8; it stands in for any unverified level.
+        code, out, _ = run("outline", str(self._renamed_section(8)))
         self.assertEqual(code, 0)
-        self.assertRegex(out, r"SECTION-4 재무상태표 \[unverified element\]")
+        self.assertRegex(out, r"SECTION-8 재무상태표 \[unverified element\]")
+
+    def test_schema_equivalent_elements_are_editable(self) -> None:
+        deep = self._renamed_section(4)
+        code, out, _ = run("check", str(deep), "--no-schema")
+        self.assertIn("ok (no issues)", out)
+        code, out, _ = run("outline", str(deep))
+        self.assertRegex(out, r"SECTION-4 재무상태표\r?\n")
+        code, out, _ = run("read", str(deep))
+        self.assertIn("##### 재무상태표", out)
+        self.assertNotIn("unverified", out)
+        code, _, err = run("set-cell", str(deep), "--table", "3", "--row", "4", "--col", "2",
+                           "--text", "1,100,000", "-o", str(self.out("a.dsd")))
+        self.assertEqual(code, 0, err)
+        code, _, err = run("replace", str(deep), "--old", "1. 일반사항", "--new", "1. 일반 사항",
+                           "-o", str(self.out("b.dsd")))
+        self.assertEqual(code, 0, err)
+
+        xml = contents_of(self.src)
+        self.assertIn("</TBODY>", xml)
+        footed = self._with_contents(xml.replace("</TBODY>", "</TBODY>\r\n<TFOOT></TFOOT>", 1), "tfoot.dsd")
+        code, out, _ = run("check", str(footed), "--no-schema")
+        self.assertIn("ok (no issues)", out)
 
     def test_unverified_elements_inside_scaffolding_are_ignored(self) -> None:
         comment = "<COMMENT>◆click◆ 예시: 정정 안내 문단 삽입</COMMENT>"

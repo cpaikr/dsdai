@@ -157,12 +157,23 @@ treated as verified:
 `SECTION-3` `SPAN` `SUMMARY` `TABLE` `TABLE-GROUP` `TBODY` `TD` `TE` `TH`
 `THEAD` `TITLE` `TOC` `TR` `TU` `WARNING`
 
-The DART schemas also allow elements that have not been observed yet:
-`CAUTION`, `CORRECTION`, `DESCRIPTION`, `EMPHASIS`, `NOTE`, `NOTE-GROUP`,
-`SECTION-4` to `SECTION-7`, `SUBTITLE`, `TFOOT`, and a lowercase
-`section-5`. Their layout conventions and any coupling between their text
-and attributes are unknown. Documents from before `dart3.xsd` (the older DTD
-formats) are also unverified.
+Verified by schema equivalence: these elements have not been observed, but
+both DART schemas give them the same content model and attributes as an
+observed element that the helper handles by the same rule:
+
+`SECTION-4` `SECTION-5` `SECTION-6` `SECTION-7` `TFOOT`
+
+`SECTION-4` to `SECTION-6` match `SECTION-2`, and `SECTION-7` matches it
+except that it allows no deeper section. `TFOOT` matches `TBODY`. The
+helper's tests re-check this against the installed schemas. **Inferred:**
+DART Editor's `ATOCID` numbering in sections this deep is unobserved, so add
+deep sections through the text route and keep `check`'s TOC warnings clean.
+
+The DART schemas also allow elements that remain unverified: `CAUTION`,
+`CORRECTION`, `DESCRIPTION`, `EMPHASIS`, `NOTE`, `NOTE-GROUP`, `SUBTITLE`,
+and a lowercase `section-5`. Their layout conventions and any coupling
+between their text and attributes are unknown. Documents from before
+`dart3.xsd` (the older DTD formats) are also unverified.
 
 When a document contains one of these, or declares another schema:
 
@@ -177,7 +188,9 @@ When a document contains one of these, or declares another schema:
 
 Verifying a new element means testing `read`, `table`, and the edit commands
 on a real document that uses it, then adding it to `OBSERVED_TAGS` in
-`scripts/dsd.py` with a test.
+`scripts/dsd.py` with a test. Schema equivalence (`SCHEMA_EQUIVALENT_TAGS`)
+applies only when the content model and attributes match an observed
+element exactly and the helper already handles both with the same code.
 
 ## Manual edit recipes
 

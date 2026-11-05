@@ -40,13 +40,14 @@ CELL_TAGS = ("TH", "TD", "TE", "TU")
 ROW_SECTIONS = ("THEAD", "TBODY", "TFOOT")
 SCAFFOLD_TAGS = ("COMMENT", "LIBRARYLIST", "FILENAME")  # editor-only, never printed
 BLOCK_TEXT_TAGS = ("P", "TITLE", "COVER-TITLE", "IMG-CAPTION", "WARNING", "SUBTITLE")
-# Elements and schemas seen in real DART Editor output (listed with the unseen
-# remainder in references/format.md). Every rule in this helper was checked
-# only against these. Anything else is copied through byte for byte, but the
-# helper does not guess at its meaning: check/inspect warn, read/outline/table/
-# find mark it, and the edit commands refuse to touch it, leaving such edits to
-# the extract -> text edit -> pack route. Add a tag only after verifying the
-# helper's rendering and edits on a real document that uses it.
+# Elements the helper's rules are verified for (listed, with the unverified
+# remainder, in references/format.md). Anything else is copied through byte for
+# byte, but the helper does not guess at its meaning: check/inspect warn,
+# read/outline/table/find mark it, and the edit commands refuse to touch it,
+# leaving such edits to the extract -> text edit -> pack route.
+#
+# OBSERVED_TAGS were seen in real DART Editor output. Add one only after
+# verifying rendering and edits on a real document that uses it.
 OBSERVED_TAGS = frozenset({
     "A", "APPENDIX", "BODY", "COL", "COLGROUP", "COMMENT", "COMPANY-NAME", "COVER", "COVER-TITLE",
     "DOCUMENT", "DOCUMENT-HEADER", "DOCUMENT-NAME", "EXTRACTION", "FILENAME", "FORMULA-VERSION",
@@ -54,6 +55,14 @@ OBSERVED_TAGS = frozenset({
     "SECTION-1", "SECTION-2", "SECTION-3", "SPAN", "SUMMARY", "TABLE", "TABLE-GROUP", "TBODY",
     "TD", "TE", "TH", "THEAD", "TITLE", "TOC", "TR", "TU", "WARNING",
 })
+# Never seen, but both DART schemas give them exactly the content model and
+# attributes of an observed element, which the helper already handles by the
+# same rule: SECTION-4..6 match SECTION-2, SECTION-7 matches it without a
+# nested section (headings follow SECTION-<n>), and TFOOT matches TBODY
+# (rows come from ROW_SECTIONS). A private-corpus test re-checks this against
+# the installed schemas.
+SCHEMA_EQUIVALENT_TAGS = frozenset({"SECTION-4", "SECTION-5", "SECTION-6", "SECTION-7", "TFOOT"})
+VERIFIED_TAGS = OBSERVED_TAGS | SCHEMA_EQUIVALENT_TAGS
 OBSERVED_SCHEMAS = ("dart3.xsd", "dart4.xsd")
 RAW_ROUTE = "edit contents.xml as text instead (extract -> edit -> pack, then check --against and diff)"
 MAX_ARCHIVE_BYTES = 200 * 1024 * 1024
@@ -605,7 +614,7 @@ def iter_blocks(doc: Doc) -> Iterator[Block]:
                     tuple(sorted(set(outer) | set(unverified_tags(child)))),
                 )
             else:
-                inner = outer if child.tag in OBSERVED_TAGS else tuple(sorted(set(outer) | {child.tag}))
+                inner = outer if child.tag in VERIFIED_TAGS else tuple(sorted(set(outer) | {child.tag}))
                 yield from walk(child, inner)
 
     yield from walk(doc.root, ())
@@ -657,14 +666,14 @@ def img_refs(doc: Doc) -> List[str]:
 
 
 def unverified_nodes(node: Node) -> Iterator[Node]:
-    """Elements in `node`'s subtree (itself included) outside OBSERVED_TAGS.
+    """Elements in `node`'s subtree (itself included) outside VERIFIED_TAGS.
 
     Editor scaffolding (COMMENT, LIBRARYLIST, FILENAME) is skipped: the helper
     never renders or edits its contents, so nothing inside it is interpreted.
     """
     if node.tag in SCAFFOLD_TAGS:
         return
-    if node.tag not in OBSERVED_TAGS:
+    if node.tag not in VERIFIED_TAGS:
         yield node
     for child in node.children:
         yield from unverified_nodes(child)
@@ -676,7 +685,7 @@ def unverified_tags(node: Node) -> List[str]:
 
 
 def unverified_ancestor_tags(node: Node) -> List[str]:
-    return sorted({a.tag for a in node.ancestors() if a.tag not in OBSERVED_TAGS})
+    return sorted({a.tag for a in node.ancestors() if a.tag not in VERIFIED_TAGS})
 
 
 def unverified_schema(doc: Doc) -> Optional[str]:
@@ -1118,7 +1127,7 @@ def op_replace(
 
     # With --table the root is the TABLE; an unverified container around it
     # encloses every hit, so it counts too.
-    unverified = list(unverified_nodes(root)) + [a for a in root.ancestors() if a.tag not in OBSERVED_TAGS]
+    unverified = list(unverified_nodes(root)) + [a for a in root.ancestors() if a.tag not in VERIFIED_TAGS]
 
     def unverified_note(offset: int) -> str:
         tags = sorted({n.tag for n in unverified if n.open_end <= offset < n.close_start})
@@ -1370,7 +1379,7 @@ class MarkdownRenderer:
             # Leaves render their whole subtree; containers are walked, so they
             # mark only themselves and their children mark the rest.
             leaf = tag in ("TITLE", "COVER-TITLE", "P", "SUBTITLE", "TABLE", "IMAGE", "WARNING")
-            unseen = unverified_tags(item) if leaf else ([tag] if tag not in OBSERVED_TAGS else [])
+            unseen = unverified_tags(item) if leaf else ([tag] if tag not in VERIFIED_TAGS else [])
             if unseen:
                 names = ",".join(unseen).replace("--", "- -")
                 self.emit(f"<!-- dsd:unverified {names} line={self.doc.line(item.start)}: rendering not verified -->")
@@ -1562,10 +1571,10 @@ def cmd_outline(args: argparse.Namespace) -> int:
             if tag in ("PART",) or tag.startswith("SECTION-"):
                 title = next((c for c in child.children if c.tag == "TITLE"), None)
                 name = " ".join(node_text(title).split()) if title is not None else ""
-                flag = " [unverified element]" if tag not in OBSERVED_TAGS else ""
+                flag = " [unverified element]" if tag not in VERIFIED_TAGS else ""
                 _print(f"{line:>7}  {pad}{tag} {name}{flag}")
                 walk(child, depth + 1)
-            elif tag not in OBSERVED_TAGS:
+            elif tag not in VERIFIED_TAGS:
                 _print(f"{line:>7}  {pad}<{tag}> unverified element (contents shown below as found)")
                 walk(child, depth + 1)
             elif tag == "COVER-TITLE":

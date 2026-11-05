@@ -49,9 +49,11 @@ spacing. Editor guidance (`◆click◆` comments, `LIBRARYLIST`, `WARNING`) and
 unfilled `INSERTION` slots are not document content.
 
 The helper's rules were verified only on elements and schemas seen in real
-DART Editor output. It shows anything else as found but does not interpret
-it: `inspect`/`check` report `unverified-element` or `unverified-schema`,
-Markdown carries `<!-- dsd:unverified … -->` markers and an `unverified`
+DART Editor output, plus a few deeper-level elements (`SECTION-4` to
+`SECTION-7`, `TFOOT`) whose schema definition matches a seen one; the
+[format reference](references/format.md) lists both. The helper shows
+anything else as found but does not interpret it: `inspect`/`check`
+report `unverified-element` or `unverified-schema`, Markdown carries `<!-- dsd:unverified … -->` markers and an `unverified`
 front-matter field, `find` tags hits `[unverified …]`, and `table` warns that
 coordinates may not match DART Editor. When such content matters to the
 task, read the raw XML at the reported line (`extract`) and the
