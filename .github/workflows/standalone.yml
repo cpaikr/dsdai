@@ -1,0 +1,111 @@
+name: Native targets
+
+# Builds, tests, and certifies every release target on its own native runner,
+# then assembles the release bundle. Called by CI and Release.
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  targets:
+    if: github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Read the tool-owned target inventory
+        id: matrix
+        run: echo "matrix=$(python3 scripts/release.py matrix)" >> "$GITHUB_OUTPUT"
+
+  target:
+    if: github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    name: Build and certify / ${{ matrix.id }}
+    needs: targets
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      PYTHON: ${{ matrix.os == 'win32' && 'python' || 'python3' }}
+      TARGET_ID: ${{ matrix.id }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Set up Rust 1.88
+        env:
+          RUST_TARGET: ${{ matrix.rustTarget }}
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install 1.88.0 --profile minimal --target "$RUST_TARGET"
+      - name: Rust test suite
+        run: cargo test --workspace --all-features --locked
+      - name: Build the production archive
+        run: $PYTHON scripts/release.py build "$TARGET_ID" release-artifact/archive
+      - name: Install and certify the exact archive
+        run: $PYTHON scripts/release.py certify "$TARGET_ID" release-artifact/archive "release-artifact/report/$TARGET_ID.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dsd-archive-${{ matrix.id }}
+          path: release-artifact/archive/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dsd-certification-${{ matrix.id }}
+          path: release-artifact/report/*
+          if-no-files-found: error
+          retention-days: 14
+
+  bundle:
+    if: github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: target
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          pattern: dsd-archive-*
+          path: release-artifact/archives
+          merge-multiple: true
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          pattern: dsd-certification-*
+          path: release-artifact/reports
+          merge-multiple: true
+      - name: Require every target's archive and native certification
+        run: python3 scripts/release.py assemble release-artifact/archives release-artifact/reports release-artifact/bundle
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dsd-release
+          path: release-artifact/bundle/*
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  # Same-repo PRs authored by the maintainer run automatically; the job gates
+  # below skip everyone else's PRs, and fork PRs also need workflow approval.
+  # Never pull_request_target: untrusted code must not see a write token.
+  pull_request:
+
+permissions:
+  contents: read
+
+# A commit has one required status; serialize runs that report on the same SHA.
+# PR runs validate and report on the PR head SHA, not GitHub's merge commit.
+concurrency:
+  group: ci-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  status_pending:
+    if: github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    steps:
+      - name: Mark exact-source CI pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          gh api --silent --method POST "repos/$GH_REPO/statuses/$SOURCE_SHA" \
+            -f context=ci/validated-source -f state=pending \
+            -f description='CI validation and native target certification are running.' \
+            -f target_url="$RUN_URL"
+
+  validate:
+    if: github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: status_pending
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy,rustfmt
+      - name: Repository checks
+        run: python3 scripts/check.py
+      - name: Release version authority
+        run: python3 scripts/release.py version
+
+  standalone:
+    if: github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: status_pending
+    uses: ./.github/workflows/standalone.yml
+    with:
+      source_sha: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  status_complete:
+    if: always() && github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.user.login == 'sjunepark' && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: [status_pending, validate, standalone]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      statuses: write
+    env:
+      RUN_CANCELLED: 'false'
+    steps:
+      - name: Record cancellation
+        if: cancelled()
+        run: echo 'RUN_CANCELLED=true' >> "$GITHUB_ENV"
+      - name: Report exact-source CI result
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+          PENDING_RESULT: ${{ needs.status_pending.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+          STANDALONE_RESULT: ${{ needs.standalone.result }}
+        run: |
+          if [ "$RUN_CANCELLED" = false ] && [ "$PENDING_RESULT" = success ] && [ "$VALIDATE_RESULT" = success ] && [ "$STANDALONE_RESULT" = success ]; then
+            state=success
+          else
+            state=failure
+          fi
+          gh api --silent --method POST "repos/$GH_REPO/statuses/$SOURCE_SHA" \
+            -f context=ci/validated-source -f state="$state" \
+            -f description='CI validation and native target certification completed.' \
+            -f target_url="$RUN_URL"
+          test "$state" = success
