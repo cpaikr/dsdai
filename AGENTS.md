@@ -40,10 +40,15 @@
   the library.
 - Until cutover, `scripts/parity.py` compares the CLI with
   `skills/dart-dsd/scripts/dsd.py`; differences are defects unless deliberate.
+- Releases follow [docs/release.md](docs/release.md). `scripts/release-targets.json`
+  is the only target inventory; `scripts/release.py` (standard library only)
+  packages, certifies, and publishes. Never push tags or dispatch Release as
+  part of ordinary implementation work.
 
 ## Validation
 
-- `python scripts/check.py` runs package checks, `cargo fmt`/`clippy`/`test`,
-  the Python unit tests, and — when
+- `python scripts/check.py` runs package checks, `cargo fmt`/`clippy`/`test`
+  (tests with the test-only `fixture-origin` feature), the Python unit tests
+  including the release tooling's, and — when
   `fixtures/private/` exists — a no-content round-trip over the private corpus.
 - Run it after changing the skill, the helper, or fixtures.
