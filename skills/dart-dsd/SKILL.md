@@ -42,15 +42,20 @@ copies where the user asked, or beside the source.
      `&cr;` line break. Tables appear as `T#` stubs; images by member name.
      An element inside text other than `SPAN`/`A` stays visible as
      `⟦TAG⟧…⟦/TAG⟧`. `COMMENT`, `LIBRARYLIST`, and `FILENAME` scaffolding is
-     hidden unless `--scaffold`; `WARNING` lines are shown. Use `-o FILE` for
-     long documents.
-   - `table FILE N …` prints exact cell text with `R#`/`C#` coordinates,
-     spans, row locks, and `ACODE`/`AUNIT` metadata.
+     hidden unless `--scaffold`; `WARNING` lines are shown. A `#` header
+     (source, schema, counts, legend, unverified elements) precedes the rows;
+     `--no-header` omits it. Use `-o FILE` for long documents.
+   - `table FILE N …` prints cell text with `R#`/`C#` coordinates, spans,
+     row locks, and `ACODE`/`AUNIT` metadata. Cell text is normalized for
+     reading: `&cr;` becomes a real line break, trailing whitespace and blank
+     first or last lines are trimmed, and whitespace-only paragraphs are
+     dropped; leading indentation is kept.
    - `find FILE TEXT` locates text across cells and paragraphs, ignoring
      whitespace differences unless `--exact`.
 
-Both `read` and `table` keep text exactly as stored, so quote figures and
-titles from them. When the user wants Markdown or another formatted
+`read` keeps text exactly as stored, and `table` keeps every character that
+carries content, so quote figures and titles from them; use `read` (or
+`extract`) when trailing or whitespace-only text matters. When the user wants Markdown or another formatted
 rendering, write it yourself from that output: section levels come from
 `SECTION-n`, cells from `table`, and images from `extract`. Editor guidance
 (`◆click◆` comments, `LIBRARYLIST`, `WARNING`) and unfilled `INSERTION` slots

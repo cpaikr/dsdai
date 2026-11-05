@@ -177,6 +177,8 @@ class ReadTests(DsdTestCase):
         stray = next(r for r in rows if r[2] == '"떠도는 글"')
         self.assertEqual(contents_of(variant).split("\r\n")[stray[0] - 1], "떠도는 글")
         self.assertIn(("SECTION-1/#text", '"\u3000\u3000"'), [r[1:] for r in rows])
+        # ASCII spacing inside a title survives as stored (visible_text below ignores whitespace).
+        self.assertIn(("SECTION-1/TITLE", '"(\ucca8\ubd80)\uc7ac \ubb34 \uc81c \ud45c"'), [r[1:] for r in rows])
         self.assertIn(("SECTION-2/P", '"1. 일반사항⟦T4 -> table 4⟧끝"'), [r[1:] for r in rows])
         self.assertIn(("SECTION-2/NEWTHING", '"앞뒤"'), [r[1:] for r in rows])
         self.assertEqual(visible_text(variant), source_text(variant))
