@@ -22,7 +22,13 @@ Output:
   error, metadata}. Exit status 0 = ok, 1 = failure (including `check` errors),
   2 = invalid invocation. Views accept --format text for a compact listing;
   failures stay JSON. --pretty indents JSON. Help and --version are plain text.
-  Edits always write a new file and refuse to replace one without --force.";
+  Edits always write a new file and refuse to replace one without --force.
+
+Updates:
+  After a successful command, dsd may report a newer release: one entry in the
+  JSON `advisories` array, or a stderr line after --format text output. The
+  result and exit status never change. DSD_NO_UPDATE_CHECK=1 disables this; see
+  `dsd version --help` and `dsd upgrade --help`.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -279,8 +285,20 @@ CRLF-to-LF conversion, and edits that add structural errors.")]
         #[command(flatten)]
         write: WriteArgs,
     },
-    /// Report the version and release target.
-    Version,
+    /// Report the version and release target; --check compares with the latest release.
+    #[command(after_help = crate::help::VERSION_AFTER)]
+    Version {
+        /// Compare with the latest stable GitHub release, even when no update exists.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Replace this receipt-managed installation with the latest stable release.
+    #[command(after_help = crate::help::UPGRADE_AFTER)]
+    Upgrade {
+        /// Report whether a newer release is available without installing it.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 impl Command {
@@ -300,7 +318,14 @@ impl Command {
             Self::Apply { .. } => "apply",
             Self::Extract { .. } => "extract",
             Self::Pack { .. } => "pack",
-            Self::Version => "version",
+            Self::Version { .. } => "version",
+            Self::Upgrade { .. } => "upgrade",
         }
+    }
+
+    /// Whether a successful run may carry an incidental release advisory.
+    /// `version` and `upgrade` report release state themselves.
+    pub const fn checks_release(&self) -> bool {
+        !matches!(self, Self::Version { .. } | Self::Upgrade { .. })
     }
 }

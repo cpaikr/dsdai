@@ -16,6 +16,7 @@ use dsd::{Archive, Error, ErrorCode, Issue, document, read_archive, views};
 
 use crate::cli::{Command, Format};
 use crate::envelope::{Failure, Warning};
+use crate::{release_check, upgrade};
 
 pub enum Output {
     Json { result: Value, warnings: Vec<Warning> },
@@ -110,11 +111,20 @@ pub fn run(command: Command) -> Outcome {
             result["changedMembers"] = json!(report.changed_members);
             Ok(Output::Json { result, warnings })
         }
-        Command::Version => json_ok(json!({
-            "name": "dsd",
-            "version": crate::VERSION,
-            "target": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        })),
+        Command::Version { check } => {
+            let mut result = json!({
+                "name": "dsd",
+                "version": crate::VERSION,
+                "target": release_check::TARGET,
+            });
+            if check {
+                let report = release_check::explicit_check();
+                result["nextStep"] = json!(report.update_help());
+                result["releaseCheck"] = json!(report);
+            }
+            json_ok(result)
+        }
+        Command::Upgrade { check } => Ok(Output::Json { result: upgrade::run(check)?, warnings: Vec::new() }),
     }
 }
 

@@ -1,0 +1,36 @@
+[
+  {
+    "id": "linux-x64-gnu",
+    "os": "linux",
+    "arch": "x64",
+    "executable": "dsd",
+    "rustTarget": "x86_64-unknown-linux-gnu",
+    "runner": "ubuntu-24.04",
+    "maxGlibc": "2.39"
+  },
+  {
+    "id": "linux-arm64-gnu",
+    "os": "linux",
+    "arch": "arm64",
+    "executable": "dsd",
+    "rustTarget": "aarch64-unknown-linux-gnu",
+    "runner": "ubuntu-24.04-arm",
+    "maxGlibc": "2.39"
+  },
+  {
+    "id": "darwin-arm64",
+    "os": "darwin",
+    "arch": "arm64",
+    "executable": "dsd",
+    "rustTarget": "aarch64-apple-darwin",
+    "runner": "macos-15"
+  },
+  {
+    "id": "win32-x64",
+    "os": "win32",
+    "arch": "x64",
+    "executable": "dsd.exe",
+    "rustTarget": "x86_64-pc-windows-msvc",
+    "runner": "windows-2025"
+  }
+]

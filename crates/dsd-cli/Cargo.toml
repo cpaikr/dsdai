@@ -7,17 +7,28 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# Test-only: lets integration tests point release checks and upgrades at a
+# local fixture origin. Release packaging refuses executables built with it.
+fixture-origin = []
+
 [[bin]]
 name = "dsd"
 path = "src/main.rs"
 doc = false
 
 [dependencies]
+chrono.workspace = true
 clap.workspace = true
 dsd = { path = "../dsd" }
+flate2.workspace = true
+fs4.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tar.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
@@ -25,4 +36,3 @@ workspace = true
 [dev-dependencies]
 crc32fast.workspace = true
 encoding_rs.workspace = true
-flate2.workspace = true

@@ -50,6 +50,86 @@ fn version_is_plain_text_and_json() {
     assert_eq!(v.stdout, format!("dsd {}\n", env!("CARGO_PKG_VERSION")));
     let r = dsd(["version"]).ok();
     assert_eq!(r["version"], env!("CARGO_PKG_VERSION"));
+    assert!(r["target"].is_string() || r["target"].is_null());
+    assert!(r.get("releaseCheck").is_none(), "plain version stays local");
+}
+
+/// Runs `dsd` with release checks enabled but unable to refresh: a relative
+/// cache directory is refused, and incidental checks never refresh without a
+/// cache, so no request is made. Fixture-origin builds get an unreachable origin.
+fn dsd_with_release_checks(args: &[&str]) -> support::Run {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_dsd"))
+        .args(args)
+        .env_remove("DSD_NO_UPDATE_CHECK")
+        .env("DSD_CACHE_DIR", "relative-cache")
+        .env("DSD_FIXTURE_RELEASE_ORIGIN", "http://127.0.0.1:9")
+        .output()
+        .unwrap();
+    support::Run {
+        code: out.status.code().unwrap_or(-1),
+        stdout: String::from_utf8(out.stdout).unwrap(),
+        stderr: String::from_utf8(out.stderr).unwrap(),
+    }
+}
+
+#[test]
+fn version_check_respects_the_opt_out_and_reports_in_one_envelope() {
+    let run = dsd(["version", "--check"]);
+    assert!(run.stderr.is_empty());
+    assert_eq!(run.stdout.matches('\n').count(), 1);
+    let v = run.json();
+    assert_eq!(v["command"], "version");
+    assert!(v.get("advisories").is_none());
+    let check = &run.ok()["releaseCheck"];
+    assert_eq!(check["freshness"], "unavailable");
+    assert_eq!(check["currentVersion"], env!("CARGO_PKG_VERSION"));
+    assert!(check["problems"][0].as_str().unwrap().contains("DSD_NO_UPDATE_CHECK"), "{check}");
+    assert_eq!(run.json()["result"]["nextStep"], Value::Null);
+}
+
+#[test]
+fn upgrade_check_refuses_an_unmanaged_build_without_network() {
+    for run in [dsd(["upgrade", "--check"]), dsd_with_release_checks(&["upgrade", "--check"])] {
+        let e = run.fails("unmanaged_installation");
+        assert!(e["hint"].as_str().unwrap().contains("README"));
+        assert_eq!(run.json()["command"], "upgrade");
+        assert!(run.json().get("advisories").is_none());
+        assert_eq!(run.stdout.matches('\n').count(), 1);
+        assert!(run.stderr.is_empty(), "stages go only to a terminal");
+    }
+}
+
+#[test]
+fn advisories_never_change_results_or_exit_status() {
+    let w = Work::new("advisories");
+    let src = s(&w.src());
+    let quiet = dsd(["check", &src, "--no-schema"]);
+    let noted = dsd_with_release_checks(&["check", &src, "--no-schema"]);
+    assert_eq!(noted.code, 0);
+    let mut v = noted.json();
+    let advisories = v.as_object_mut().unwrap().remove("advisories").expect("an evidence advisory");
+    assert_eq!(advisories.as_array().unwrap().len(), 1);
+    assert_eq!(advisories[0]["code"], "update_check_unavailable");
+    assert!(advisories[0]["message"].as_str().unwrap().contains("DSD_CACHE_DIR"));
+    assert_eq!(v, quiet.json(), "only advisories differ");
+    assert!(noted.stderr.is_empty());
+
+    // Text views keep stdout and put the notice on stderr.
+    let text = ["outline", src.as_str(), "--format", "text"];
+    let (quiet, noted) = (dsd(text), dsd_with_release_checks(&text));
+    assert_eq!((noted.code, noted.stdout.as_str()), (0, quiet.stdout.as_str()));
+    assert_eq!(noted.stderr.lines().count(), 1);
+    assert!(noted.stderr.starts_with("dsd notice: "), "{}", noted.stderr);
+
+    // Failures and invalid invocations carry no advisory and keep their status.
+    let missing = dsd_with_release_checks(&["inspect", &s(&w.path("nope.dsd"))]);
+    missing.fails("file_not_found");
+    assert!(missing.json().get("advisories").is_none() && missing.stderr.is_empty());
+    let invalid = dsd_with_release_checks(&["outline", "--format", "text"]);
+    invalid.fails("invalid_invocation");
+    assert!(invalid.json().get("advisories").is_none() && invalid.stderr.is_empty());
+    let version = dsd_with_release_checks(&["version"]);
+    assert!(version.ok().get("releaseCheck").is_none() && version.json().get("advisories").is_none());
 }
 
 #[test]
