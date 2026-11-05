@@ -1,0 +1,12 @@
+# Confidential audit samples and locally installed DART resources.
+/fixtures/private/
+
+# Generated project skill placements and sjskills machine-local state.
+/.agents/skills/*
+/.claude/skills/*
+/.sjskills/
+
+# Scratch output from local conversions and experiments.
+/.tmp/
+__pycache__/
+*.pyc

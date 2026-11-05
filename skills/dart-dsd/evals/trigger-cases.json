@@ -1,0 +1,21 @@
+{
+  "skill_name": "dart-dsd",
+  "policy": "implicit",
+  "rationale": "The .dsd extension and DART Editor vocabulary match reliably, and the owner keeps hundreds of .dsd audit files, so unprompted discovery is useful; near misses below guard the boundary.",
+  "should_trigger": [
+    "이 감사보고서.dsd 파일 내용을 마크다운으로 뽑아줘",
+    "Update the 현금및현금성자산 figure in report.dsd to 1,100,000 and save a new copy.",
+    "분기검토보고서 DSD 주석 표에 행 하나 추가해 줘",
+    "Compare the two .dsd drafts and tell me which numbers changed.",
+    "DART 편집기 파일(.dsd) 기간을 2025년 12월 31일로 바꿔줘",
+    "Check whether my edited .dsd will still open cleanly in DART Editor."
+  ],
+  "should_not_trigger": [
+    "OpenDART API로 삼성전자 사업보고서 원문 받아줘",
+    "Sign and submit this .drt package to DART.",
+    "DART 편집기 설치가 안 돼요, 오류 메시지 봐줘",
+    "Convert this audit report PDF into Markdown.",
+    "K-IFRS 1116호 리스 문단 찾아줘",
+    "이 엑셀 재무제표 숫자 맞는지 검토해줘"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "skill_name": "dart-dsd",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "fixtures/public/sample.dsd 내용을 읽기 좋은 마크다운으로 만들어 줘.",
+      "hard_because": "Generic unzip shows mojibake image names and raw XML; &cr; tokens, editor comments, and span tables need DSD-specific handling.",
+      "expected_output": "Runs inspect/outline, then read -o beside the source (sample.md plus sample.assets/). The Markdown keeps section headings, renders the rowspan/colspan shareholder table as HTML, turns &cr; into line breaks, omits ◆click◆ scaffolding, and links the image. Does not upload or paste the full document elsewhere."
+    },
+    {
+      "id": 2,
+      "prompt": "sample.dsd 재무상태표에서 당기 현금및현금성자산을 1,100,000으로 바꿔줘. 원본은 그대로 두고.",
+      "hard_because": "The figure must be located by table/row/column; totals depend on it, and a regenerated XML or re-zip would corrupt CP949 image names.",
+      "expected_output": "Locates T3R4C2 with find/table, writes a new file with set-cell, leaves the original untouched, runs check --against and diff showing exactly one changed cell, and reports that 유동자산 (T3R3C2) and 자산총계 (T3R6C2) now disagree with the new figure unless the user asked to update them."
+    },
+    {
+      "id": 3,
+      "prompt": "Change the reporting period end in sample.dsd to 2026-12-31.",
+      "hard_because": "The cover date is a TU cell whose AUNITVALUE must change with the display text.",
+      "expected_output": "Uses set-cell on T1R2C1 with --text '2026년 12월 31일' and --unit-value 20261231, considers the period-start cell and other period references, and verifies with check (no unit-value warning) and diff."
+    },
+    {
+      "id": 4,
+      "prompt": "sample.dsd 주주 현황 표에 '김철수 / 0 / 0.00%' 행을 추가해 줘.",
+      "hard_because": "Row copying must respect ROWSPAN headers and keep TE ACODE attributes.",
+      "expected_output": "Copies a body row of T4 (not a header row inside the ROWSPAN) with copy-row --clear or an apply batch, fills the three cells with set-cell, writes a new file, and verifies check/diff. Does not hand-build the row with an XML library."
+    },
+    {
+      "id": 5,
+      "prompt": "sample.dsd에서 '2025년'을 전부 '2026년'으로 바꿔서 덮어써 줘.",
+      "hard_because": "Bulk replacement can hit TU cells whose AUNITVALUE also needs changing, and overwriting the source needs explicit authority, which this request gives.",
+      "expected_output": "Runs replace --dry-run to see every occurrence (including the two TU cover dates, flagged as keeping their AUNITVALUE), replaces with the verified --expect count or uses set-cell --unit-value for the TU cells so machine values follow, writes with --force to the source only because the user asked to overwrite, and reports TU machine values and other period dependents."
+    },
+    {
+      "id": 6,
+      "prompt": "이 DSD 파일 구조만 알려줘. 내용은 보여주지 마.",
+      "hard_because": "Confidential content must not be echoed.",
+      "expected_output": "Uses inspect (and outline only if headings are acceptable), reporting versions, member list, counts, and issues without quoting document text."
+    }
+  ]
+}

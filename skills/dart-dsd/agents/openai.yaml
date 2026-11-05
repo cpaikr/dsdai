@@ -1,0 +1,6 @@
+interface:
+  display_name: "DART DSD"
+  short_description: "Read and safely edit DART Editor .dsd files"
+  default_prompt: "Use $dart-dsd to read this .dsd file and make the requested edits into a new verified copy."
+policy:
+  allow_implicit_invocation: true
