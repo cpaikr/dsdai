@@ -15,13 +15,57 @@ pub type NodeId = usize;
 /// consumer of the tree recurses over it.
 pub const MAX_DEPTH: usize = 512;
 
-/// The `encoding` pseudo-attribute of an XML declaration body.
-fn declared_encoding(decl: &str) -> Option<&str> {
-    let at = decl.find("encoding")?;
-    let rest = decl[at + 8..].trim_start().strip_prefix('=')?.trim_start();
-    let quote = rest.chars().next().filter(|q| *q == '"' || *q == '\'')?;
-    let body = &rest[1..];
-    body.find(quote).map(|end| &body[..end])
+const XML_SPACE: [char; 4] = [' ', '\t', '\r', '\n'];
+
+/// Check an XML declaration body (between `<?xml` and `?>`) against the
+/// declaration grammar: `version`, then optional `encoding` and `standalone`,
+/// in that order, each preceded by whitespace. Returns the declared encoding.
+fn parse_xml_decl(body: &str) -> std::result::Result<Option<String>, String> {
+    const FIELDS: [&str; 3] = ["version", "encoding", "standalone"];
+    let mut rest = body;
+    let mut last: Option<usize> = None;
+    let mut encoding = None;
+    loop {
+        let trimmed = rest.trim_start_matches(XML_SPACE);
+        if trimmed.is_empty() {
+            break;
+        }
+        if trimmed.len() == rest.len() {
+            return Err("missing whitespace in the XML declaration".into());
+        }
+        let name_end = trimmed.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(trimmed.len());
+        let name = &trimmed[..name_end];
+        let field =
+            FIELDS.iter().position(|f| *f == name).ok_or_else(|| format!("unknown XML declaration field {name:?}"))?;
+        if last.map_or(field != 0, |l| field <= l) {
+            return Err("XML declaration fields are missing or out of order".into());
+        }
+        let after = trimmed[name_end..].trim_start_matches(XML_SPACE);
+        let after = after.strip_prefix('=').ok_or("malformed XML declaration")?.trim_start_matches(XML_SPACE);
+        let quote = after.chars().next().filter(|q| *q == '"' || *q == '\'').ok_or("malformed XML declaration")?;
+        let close = after[1..].find(quote).ok_or("malformed XML declaration")? + 1;
+        let value = &after[1..close];
+        rest = &after[close + 1..];
+        let valid = match field {
+            0 => value.strip_prefix("1.").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())),
+            1 => {
+                value.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+                    && value.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            }
+            _ => value == "yes" || value == "no",
+        };
+        if !valid {
+            return Err(format!("invalid {name} in the XML declaration"));
+        }
+        if field == 1 {
+            encoding = Some(value.to_owned());
+        }
+        last = Some(field);
+    }
+    if last.is_none() {
+        return Err("the XML declaration has no version".into());
+    }
+    Ok(encoding)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,20 +277,21 @@ impl Parser<'_> {
         } else if self.starts_with("<?") {
             self.pos += 2;
             let target = self.name()?;
-            if target.eq_ignore_ascii_case("xml") && !(in_prolog && at == self.prolog_start()) {
+            if target.eq_ignore_ascii_case("xml") && (target != "xml" || !(in_prolog && at == self.prolog_start())) {
                 return Err(self.err(at, "XML or text declaration not at start of entity"));
             }
             let end = self.find("?>", self.pos).ok_or_else(|| self.err(at, "unclosed token"))?;
             self.check_chars(self.pos, end)?;
-            if target == "xml"
-                && let Some(enc) = declared_encoding(&self.src[self.pos..end])
-                && !enc.eq_ignore_ascii_case("utf-8")
-                && !enc.eq_ignore_ascii_case("utf8")
-            {
-                return Err(Error::new(
-                    ErrorCode::InvalidXml,
-                    format!("XML declares encoding {enc}; .dsd XML must be UTF-8"),
-                ));
+            if target == "xml" {
+                let declared = parse_xml_decl(&self.src[self.pos..end]).map_err(|why| self.err(at, &why))?;
+                if let Some(enc) =
+                    declared.filter(|e| !e.eq_ignore_ascii_case("utf-8") && !e.eq_ignore_ascii_case("utf8"))
+                {
+                    return Err(Error::new(
+                        ErrorCode::InvalidXml,
+                        format!("XML declares encoding {enc}; .dsd XML must be UTF-8"),
+                    ));
+                }
             }
             self.pos = end + 2;
         } else if self.starts_with("<!DOCTYPE") || self.starts_with("<!ENTITY") {
@@ -507,6 +552,11 @@ mod tests {
             b"<a x='1' x='2'/>",
             b"<a/><b/>",
             b"<a>\x01</a>",
+            b"<?xml?><a/>",
+            b"<?xml encoding=\"utf-8\"?><a/>",
+            b"<?xml version=\"1.0\"encoding=\"utf-8\"?><a/>",
+            b"<?xml version=\"1.0\" standalone=\"yes\" encoding=\"utf-8\"?><a/>",
+            b"<?XML version=\"1.0\"?><a/>",
             b"",
         ] {
             assert!(parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));

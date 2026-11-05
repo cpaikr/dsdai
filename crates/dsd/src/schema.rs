@@ -435,6 +435,19 @@ struct Link {
     prev: Assign,
 }
 
+impl Drop for Assign {
+    // A chain as long as a run of siblings would otherwise be dropped recursively.
+    fn drop(&mut self) {
+        let mut next = self.0.take();
+        while let Some(rc) = next {
+            match Rc::try_unwrap(rc) {
+                Ok(mut link) => next = link.prev.0.take(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 impl Assign {
     fn push(&self, ty: TypeId) -> Self {
         Self(Some(Rc::new(Link { ty, prev: self.clone() })))
@@ -495,7 +508,14 @@ impl Validator<'_> {
         let tag = n.tag.clone();
         if !matches!(def.content, Content::Any) {
             for (k, value) in &n.attrs {
-                if k.starts_with("xmlns") || k.starts_with("xsi:") {
+                // Namespace declarations and schema-location hints are inert; other
+                // instance attributes (xsi:type, xsi:nil) change validity in ways this
+                // validator does not implement.
+                if k.starts_with("xmlns") || k == "xsi:noNamespaceSchemaLocation" || k == "xsi:schemaLocation" {
+                    continue;
+                }
+                if k.starts_with("xsi:") {
+                    self.error(node, &format!("<{tag}> attribute {k} is not supported by this validator"));
                     continue;
                 }
                 match def.attrs.iter().find(|a| a.name == *k) {
@@ -771,6 +791,24 @@ mod tests {
         assert!(errors("<ROOT><HEAD/></ROOT>")[0].contains("required attribute CODE"));
         assert!(errors(r#"<ROOT><HEAD CODE="1"><P/></HEAD></ROOT>"#)[0].contains("must not contain elements"));
         assert!(errors(r#"<ROOT><HEAD CODE="1"/>text</ROOT>"#)[0].contains("does not allow text"));
+    }
+
+    #[test]
+    fn instance_attributes_other_than_location_hints_are_errors() {
+        assert!(
+            errors(r#"<ROOT xmlns:xsi="x" xsi:noNamespaceSchemaLocation="a.xsd"><HEAD CODE="1"/></ROOT>"#).is_empty()
+        );
+        let e = errors(r#"<ROOT xmlns:xsi="x"><HEAD CODE="1" xsi:nil="true"/></ROOT>"#);
+        assert!(e[0].contains("xsi:nil is not supported"), "{e:?}");
+    }
+
+    #[test]
+    fn long_assignment_chains_drop_without_recursion() {
+        let mut chain = Assign::default();
+        for i in 0..1_000_000 {
+            chain = chain.push(i);
+        }
+        drop(chain);
     }
 
     #[test]
