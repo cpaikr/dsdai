@@ -224,6 +224,7 @@ fn find_is_whitespace_insensitive() {
     assert_eq!(r["matches"], json!([]));
     assert_eq!(dsd(["find", &s(&w.src()), "자산총계", "--exact", "--format", "text"]).stdout, "no matches\n");
     dsd(["find", &s(&w.src()), "  "]).fails("invalid_argument");
+    assert_eq!(dsd(["find", &s(&w.src()), "- 1"]).ok()["query"], "- 1", "text may start with '-'");
 }
 
 #[test]
