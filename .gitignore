@@ -4,9 +4,13 @@
 # Generated project skill placements and sjskills machine-local state.
 /.agents/skills/*
 /.claude/skills/*
+/.claude/worktrees/
 /.sjskills/
 
 # Scratch output from local conversions and experiments.
 /.tmp/
 __pycache__/
 *.pyc
+
+# Rust build output.
+/target/

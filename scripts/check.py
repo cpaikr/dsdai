@@ -20,7 +20,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ROOT / "skills"
 PRIVATE = ROOT / "fixtures" / "private" / "audit-dsd"
-PUBLIC_FIXTURE = ROOT / "fixtures" / "public" / "sample.dsd"
 ALLOWED_FIELDS = {"name", "description", "license", "compatibility", "metadata", "allowed-tools"}
 EXEMPT_DIRS = {"agents", "evals"}
 
@@ -82,14 +81,19 @@ def run_unit_tests() -> None:
             print(f"ok   {result.testsRun} unit tests in {evals.relative_to(ROOT).as_posix()}")
 
 
-def check_public_fixture() -> None:
-    sys.path.insert(0, str(SKILLS / "dart-dsd" / "evals"))
-    import make_fixture  # noqa: E402
-
-    if not PUBLIC_FIXTURE.is_file() or PUBLIC_FIXTURE.read_bytes() != make_fixture.fixture_bytes():
-        fail(f"{PUBLIC_FIXTURE.relative_to(ROOT)} is stale; regenerate with skills/dart-dsd/evals/make_fixture.py")
-    else:
-        print("ok   public fixture matches its generator")
+def run_cargo() -> None:
+    """Format, lint, and test the Rust workspace (this also checks that the
+    public fixture matches fixtures/public/sample/)."""
+    for args in (
+        ["fmt", "--all", "--check"],
+        ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
+        ["test", "--workspace", "--locked"],
+    ):
+        proc = subprocess.run(["cargo", *args], cwd=ROOT)
+        if proc.returncode != 0:
+            fail(f"cargo {args[0]}")
+        else:
+            print(f"ok   cargo {args[0]}")
 
 
 def private_smoke() -> None:
@@ -134,7 +138,7 @@ def private_smoke() -> None:
 def main() -> int:
     for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
         check_skill(skill)
-    check_public_fixture()
+    run_cargo()
     run_unit_tests()
     private_smoke()
     if errors:
