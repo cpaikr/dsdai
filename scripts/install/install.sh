@@ -27,8 +27,10 @@ expected=$(awk -v name="$archive_name" '$2 == name { print $1 }' "$checksums")
 [ "${#expected}" -eq 64 ] || fail "Missing or duplicate archive checksum."
 case "$expected" in *[!0-9a-f]*) fail "Invalid SHA-256 checksum." ;; esac
 [ "$(sha256 "$archive")" = "$expected" ] || fail "Archive checksum mismatch; existing installation was not changed."
-# The archive holds exactly one regular file: the executable.
-[ "$(tar -tzf "$archive")" = "dsd" ] || fail "Unexpected archive contents."
+# Only the two tool-owned regular files may be extracted; the license stays
+# in the archive.
+[ "$(tar -tzf "$archive")" = "LICENSE.md
+dsd" ] || fail "Unexpected archive contents."
 [ "$(tar -tvzf "$archive" | cut -c1 | sort -u)" = '-' ] || fail "Archive must contain only regular files."
 mkdir -p "$bin_dir"
 # The receipt records the physical directory, which JSON must be able to carry.

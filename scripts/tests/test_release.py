@@ -80,15 +80,18 @@ class ArchiveTests(unittest.TestCase):
                              (0, 0, 0, "", "", 0o755))
             self.assertTrue(member.isreg())
 
-    def test_archive_holds_exactly_the_executable(self):
-        packed = release.pack({"dsd.exe": b"binary"})
+    def test_archive_holds_exactly_the_executable_and_license(self):
+        packed = release.pack({"dsd.exe": b"binary", "LICENSE.md": b"license"})
         self.assertEqual(release.archive_executable(packed, WINDOWS), b"binary")
+        with tarfile.open(fileobj=io.BytesIO(packed), mode="r:gz") as tar:
+            self.assertEqual({m.name: m.mode for m in tar.getmembers()}, {"LICENSE.md": 0o644, "dsd.exe": 0o755})
         invalid = [
-            release.pack({"dsd": b"binary"}),
-            release.pack({"dsd.exe": b"binary", "README.md": b"readme"}),
-            release.pack({"dsd.exe": b""}),
-            tar_gz([("dsd.exe", b"", tarfile.SYMTYPE)]),
-            tar_gz([("bin/dsd.exe", b"binary", tarfile.REGTYPE)]),
+            release.pack({"dsd.exe": b"binary"}),
+            release.pack({"dsd": b"binary", "LICENSE.md": b"license"}),
+            release.pack({"dsd.exe": b"binary", "LICENSE.md": b"license", "README.md": b"readme"}),
+            release.pack({"dsd.exe": b"", "LICENSE.md": b"license"}),
+            tar_gz([("LICENSE.md", b"license", tarfile.REGTYPE), ("dsd.exe", b"", tarfile.SYMTYPE)]),
+            tar_gz([("LICENSE.md", b"license", tarfile.REGTYPE), ("bin/dsd.exe", b"binary", tarfile.REGTYPE)]),
             b"not gzip",
         ]
         for data in invalid:
@@ -167,7 +170,7 @@ class InventoryTests(unittest.TestCase):
 
 
 def fake_build(archives: Path, target: dict, executable: bytes, revision: str) -> dict:
-    packed = release.pack({target["executable"]: executable})
+    packed = release.pack({target["executable"]: executable, "LICENSE.md": b"license"})
     name = release.archive_name(VERSION, target)
     (archives / name).write_bytes(packed)
     record = {"target": target["id"], "version": VERSION, "sourceRevision": revision, "compiler": "rustc 1.88.0",

@@ -4,6 +4,7 @@ description = "Command-line interface for reading and editing DART Editor .dsd d
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 publish = false
 

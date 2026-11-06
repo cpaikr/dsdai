@@ -140,7 +140,7 @@ impl Fixture {
         if let Some(running) = running {
             command.env("DSD_FIXTURE_RUNNING_VERSION", running);
         }
-        command.output().unwrap()
+        run(&mut command)
     }
 
     fn archive_requests(&self) -> usize {
@@ -204,7 +204,7 @@ fn release_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     for (name, bytes) in entries {
         let mut header = tar::Header::new_ustar();
         header.set_size(bytes.len() as u64);
-        header.set_mode(0o755);
+        header.set_mode(if *name == "LICENSE.md" { 0o644 } else { 0o755 });
         builder.append_data(&mut header, name, *bytes).unwrap();
     }
     builder.into_inner().unwrap().finish().unwrap()
@@ -215,7 +215,7 @@ fn this_build() -> Vec<u8> {
 }
 
 fn this_archive() -> Vec<u8> {
-    release_archive(&[(EXECUTABLE, &this_build())])
+    release_archive(&[("LICENSE.md", b"license"), (EXECUTABLE, &this_build())])
 }
 
 /// The single JSON envelope; stderr is empty because it is not a terminal.
@@ -228,6 +228,23 @@ fn envelope(output: &Output) -> Value {
     value
 }
 
+/// Run a freshly copied executable. On Linux, a child spawned by another test
+/// thread can briefly inherit the copy's write descriptor, so `exec` may fail
+/// with ETXTBSY (rust-lang/rust#114554); retry that case only.
+fn run(command: &mut Command) -> Output {
+    const ETXTBSY: i32 = 26;
+    let mut attempts = 0;
+    loop {
+        match command.output() {
+            Err(e) if e.raw_os_error() == Some(ETXTBSY) && cfg!(target_os = "linux") && attempts < 20 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            result => return result.unwrap(),
+        }
+    }
+}
+
 #[test]
 fn upgrade_replaces_a_managed_installation_and_its_receipt() {
     let fixture = Fixture::new();
@@ -235,7 +252,7 @@ fn upgrade_replaces_a_managed_installation_and_its_receipt() {
     fixture.publish(CURRENT, &this_archive(), None);
 
     let checked = fixture.upgrade(&["--check"], Some(OLDER));
-    assert!(checked.status.success());
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stdout));
     let checked = envelope(&checked);
     assert_eq!(checked["ok"], true);
     assert_eq!(checked["result"]["updateAvailable"], true);
@@ -245,7 +262,7 @@ fn upgrade_replaces_a_managed_installation_and_its_receipt() {
     assert_eq!(fixture.archive_requests(), 0, "--check downloads nothing");
 
     let upgraded = fixture.upgrade(&[], Some(OLDER));
-    assert!(upgraded.status.success());
+    assert!(upgraded.status.success(), "{}", String::from_utf8_lossy(&upgraded.stdout));
     let upgraded = envelope(&upgraded);
     assert_eq!(upgraded["result"]["runningVersion"], OLDER);
     assert_eq!(upgraded["result"]["installedVersion"], CURRENT);
@@ -269,14 +286,13 @@ fn the_release_check_opt_out_does_not_disable_an_explicit_upgrade_check() {
     fixture.install(Some(OLDER));
     fixture.publish(CURRENT, &this_archive(), None);
     let mut command = Command::new(fixture.executable());
-    let output = command
+    command
         .args(["upgrade", "--check"])
         .env("DSD_FIXTURE_RELEASE_ORIGIN", &fixture.origin)
         .env("DSD_FIXTURE_RUNNING_VERSION", OLDER)
         .env("DSD_NO_UPDATE_CHECK", "1")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+        .stdin(Stdio::null());
+    let output = run(&mut command);
     assert!(output.status.success());
     assert_eq!(envelope(&output)["result"]["updateAvailable"], true);
 }
@@ -368,13 +384,13 @@ fn an_incomplete_release_is_reported_but_not_installed() {
 fn an_unreachable_release_origin_is_retryable_and_changes_nothing() {
     let fixture = Fixture::new();
     fixture.install(Some(OLDER));
-    let output = Command::new(fixture.executable())
+    let mut command = Command::new(fixture.executable());
+    command
         .args(["upgrade"])
         .env("DSD_FIXTURE_RELEASE_ORIGIN", "http://127.0.0.1:9")
         .env("DSD_FIXTURE_RUNNING_VERSION", OLDER)
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
+        .stdin(Stdio::null());
+    let output = run(&mut command);
     assert_eq!(output.status.code(), Some(1));
     let failure = envelope(&output);
     assert_eq!(failure["error"]["code"], "upgrade_source_unavailable");

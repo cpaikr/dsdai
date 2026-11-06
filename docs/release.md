@@ -48,12 +48,13 @@ for the same source revision and compiler, and writes `SHA256SUMS` and
 `release-manifest.json`. Every manifest entry therefore carries
 `runtimeCertified: true`.
 
-Archives are deterministic for a given toolchain: one entry (`dsd` or
-`dsd.exe`, mode 0755, zero timestamps and ownership, USTAR) and a gzip header
-without a name or timestamp. Archives hold only the executable because the
-repository has no license file yet; when one is added, ship it in the
-archive and update `pack` in `scripts/release.py`, the installers' entry
-checks, and `EXECUTABLE` handling in `crates/dsd-cli/src/upgrade.rs` together.
+Archives are deterministic for a given toolchain: exactly two entries,
+`LICENSE.md` (mode 0644) and `dsd` or `dsd.exe` (mode 0755), with zero
+timestamps and ownership, USTAR, and a gzip header without a name or
+timestamp. `pack` in `scripts/release.py`, the installers' entry checks, and
+`executable_from_archive` in `crates/dsd-cli/src/upgrade.rs` enforce the same
+layout and change together. Installers and `upgrade` install only the
+executable.
 
 The published release contains, for version `X.Y.Z`:
 
