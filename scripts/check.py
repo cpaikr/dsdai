@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Repository checks: skill package rules, unit tests, and private-corpus smoke.
+"""Repository checks: skill package rules, Rust and release-tooling tests, and a
+CLI smoke run over the public fixture and the private corpus.
 
 Usage: python scripts/check.py
 
-The private-corpus step runs only when fixtures/private/ exists and prints
-file indexes and counts, never document text or file names.
+Private samples are included only when fixtures/private/ exists; output names
+sample indexes and counts, never document text or file names.
 """
 
 from __future__ import annotations
 
 import json
+from collections import Counter
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -71,16 +76,6 @@ def check_skill(skill: Path) -> None:
     print(f"ok   package {skill.name}")
 
 
-def run_unit_tests() -> None:
-    for evals in sorted(SKILLS.glob("*/evals")):
-        suite = unittest.defaultTestLoader.discover(str(evals), pattern="test_*.py", top_level_dir=str(evals))
-        result = unittest.TextTestRunner(verbosity=0, stream=sys.stdout).run(suite)
-        if not result.wasSuccessful():
-            fail(f"unit tests in {evals.relative_to(ROOT)}")
-        else:
-            print(f"ok   {result.testsRun} unit tests in {evals.relative_to(ROOT).as_posix()}")
-
-
 def run_cargo() -> None:
     """Format, lint, and test the Rust workspace (this also checks that the
     public fixture matches fixtures/public/sample/). Tests run with the
@@ -111,52 +106,89 @@ def run_release_tests() -> None:
         print(f"ok   {result.testsRun} release tooling unit tests")
 
 
-def private_smoke() -> None:
-    files = sorted(PRIVATE.glob("*.dsd")) if PRIVATE.is_dir() else []
-    if not files:
-        print("skip private corpus (fixtures/private/ absent)")
-        return
-    tool = SKILLS / "dart-dsd" / "scripts" / "dsd.py"
-    sys.path.insert(0, str(SKILLS / "dart-dsd" / "evals"))
-    import test_dsd  # noqa: E402  (shares the text-completeness helpers)
+SCAFFOLD = {"COMMENT", "LIBRARYLIST", "FILENAME"}
+def executable() -> Path:
+    """The debug `dsd` in Cargo's target directory, honoring CARGO_TARGET_DIR."""
+    proc = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, capture_output=True)
+    target = Path(json.loads(proc.stdout)["target_directory"]) if proc.returncode == 0 else ROOT / "target"
+    return target / "debug" / ("dsd.exe" if sys.platform == "win32" else "dsd")
 
+
+EXE = executable()
+
+
+def dsd(*args: str) -> dict:
+    proc = subprocess.run([str(EXE), *args], capture_output=True, env={**os.environ, "DSD_NO_UPDATE_CHECK": "1"})
+    return json.loads(proc.stdout.decode("utf-8"))
+
+
+def squeeze(text: str) -> str:
+    return re.sub(r"[ \t\r\n]|⟦[^⟧]*⟧", "", text)
+
+
+def source_text(path: Path) -> str:
+    """Text outside tables and editor scaffolding, read independently with ElementTree."""
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("contents.xml"))
+
+    def walk(el: ET.Element) -> str:
+        if el.tag in SCAFFOLD or el.tag == "TABLE":
+            return ""
+        return (el.text or "") + "".join(walk(c) + (c.tail or "") for c in el)
+
+    return squeeze(walk(root).replace("&cr;", ""))
+
+
+def corpus_smoke() -> None:
+    """Run the built CLI over the public fixture and any private samples.
+
+    Prints sample indexes and counts only, never document text or file names.
+    """
+    files = [ROOT / "fixtures" / "public" / "sample.dsd"]
+    files += sorted(PRIVATE.glob("*.dsd")) if PRIVATE.is_dir() else []
+    if not EXE.is_file():
+        fail(f"{EXE} is missing; cargo test builds it")
+        return
     with tempfile.TemporaryDirectory() as tmp:
-        for i, src in enumerate(files, 1):
-            work, out, view = Path(tmp) / f"w{i}", Path(tmp) / f"o{i}.dsd", Path(tmp) / f"v{i}.txt"
+        for i, src in enumerate(files):
+            label = "public fixture" if i == 0 else f"private sample #{i}"
+            work, out = Path(tmp) / f"w{i}", Path(tmp) / f"o{i}.dsd"
             steps = [
-                ["check", str(src), "--json"],
-                ["read", str(src), "-o", str(view)],
-                ["outline", str(src)],
-                ["extract", str(src), str(work)],
-                ["pack", str(work), str(src), "-o", str(out)],
+                ("check", ["check", str(src)]),
+                ("read", ["read", str(src)]),
+                ("outline", ["outline", str(src)]),
+                ("extract", ["extract", str(src), str(work)]),
+                ("pack", ["pack", str(work), str(src), "-o", str(out)]),
             ]
-            for step in steps:
-                proc = subprocess.run([sys.executable, "-I", str(tool), *step], capture_output=True)
-                if proc.returncode != 0:
-                    fail(f"private sample #{i}: `{step[0]}` exited {proc.returncode}")
+            results = {}
+            for name, args in steps:
+                envelope = dsd(*args)
+                if not envelope["ok"]:
+                    fail(f"{label}: `{name}` failed with {envelope['error']['code']}")
                     break
-                if step[0] == "check":
-                    # Unverified elements or schemas are a prompt to verify the
-                    # helper on this sample and extend OBSERVED_TAGS, not a failure.
-                    for issue in json.loads(proc.stdout):
-                        if issue["code"].startswith("unverified-"):
-                            print(f"note private sample #{i}: {issue['code']} {issue['message'].split(':')[0]}")
+                results[name] = envelope["result"]
             else:
-                if test_dsd.visible_text(src) != test_dsd.source_text(src):
-                    fail(f"private sample #{i}: read omits or alters text outside tables")
+                # Unverified elements or schemas prompt verifying the CLI on this
+                # sample and extending OBSERVED_TAGS; they are not failures.
+                # Codes and counts only: messages can carry document values.
+                unverified = Counter(i["code"] for i in results["check"]["issues"] if i["code"].startswith("unverified-"))
+                for code, count in sorted(unverified.items()):
+                    print(f"note {label}: {code} x{count}")
+                shown = squeeze("".join(r.get("text", "") for r in results["read"]["rows"]))
+                if shown != source_text(src):
+                    fail(f"{label}: read omits or alters text outside tables")
                 elif out.read_bytes() != src.read_bytes():
-                    fail(f"private sample #{i}: extract/pack round trip is not byte-identical")
+                    fail(f"{label}: extract/pack round trip is not byte-identical")
                 else:
-                    print(f"ok   private sample #{i}: check, complete read, outline, byte-identical round trip")
+                    print(f"ok   {label}: check, complete read, outline, byte-identical round trip")
 
 
 def main() -> int:
     for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
         check_skill(skill)
     run_cargo()
-    run_unit_tests()
     run_release_tests()
-    private_smoke()
+    corpus_smoke()
     if errors:
         print(f"\n{len(errors)} check(s) failed")
         return 1
