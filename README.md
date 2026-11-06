@@ -162,8 +162,12 @@ argument, or set `$bin` to it on Windows.
 
 On Windows, a shell started by a packaged desktop app, including an agent's
 shell, may not see the same files as other programs. The installer refuses a
-redirected destination and does not change `PATH`. After a first installation,
-[add `$bin` to the user `PATH`](docs/windows-installation.md#add-the-directory-to-the-user-path),
+redirected destination and does not change `PATH`; when it refuses, set
+`$bin = "$env:USERPROFILE\.local\bin"` and run `install.ps1` again
+([why](docs/windows-installation.md#choose-a-visible-installation-directory)).
+To install into another directory, set `$bin` to it; if `dsd` should not be on
+`PATH`, skip the steps below and run it by its full path. After a first
+installation, [add `$bin` to the user `PATH`](docs/windows-installation.md#add-the-directory-to-the-user-path),
 then confirm the result from a process outside the calling app with the
 downloaded `verify-windows-install.ps1`:
 
