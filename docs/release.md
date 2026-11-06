@@ -4,7 +4,7 @@ The `dsd` CLI is distributed as prebuilt archives on the public
 [GitHub Releases of cpaikr/dsdai](https://github.com/cpaikr/dsdai/releases).
 The [README](../README.md#installation) owns the consumer installation and
 update procedure; this runbook owns targets, certification, and release
-operations. No release has been published yet; the first is planned as v0.1.0.
+operations. The first release is v0.1.0.
 
 ## Targets and certification
 
