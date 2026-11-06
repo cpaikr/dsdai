@@ -341,8 +341,13 @@ fn width_issues(doc: &Doc, table: &Table, place: &str) -> Vec<Issue> {
     for cell in &table.cells {
         let Some(h) = int_attr_strict(doc, cell.node, "HEIGHT") else { continue };
         let rows = &table.rows[cell.row - 1..(cell.row - 1 + cell.rowspan).min(table.rows.len())];
-        let Some(sum) = rows.iter().map(|&r| int_attr_strict(doc, r, "HEIGHT")).sum::<Option<i64>>() else { continue };
-        if h != sum - 7 {
+        let Some(row_heights) = rows.iter().map(|&r| int_attr_strict(doc, r, "HEIGHT")).collect::<Option<Vec<i64>>>()
+        else {
+            continue;
+        };
+        // Checked: hostile row heights read as a mismatch, never an overflow.
+        let expected = row_heights.iter().try_fold(0i64, |a, &v| a.checked_add(v)).and_then(|s| s.checked_sub(7));
+        if expected != Some(h) {
             heights.push(format!("R{}C{}", cell.row, cell.col));
         }
     }

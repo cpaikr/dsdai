@@ -764,6 +764,21 @@ fn structural_edits_refuse_out_of_range_sizes() {
 }
 
 #[test]
+fn hostile_sizes_in_another_table_never_crash_an_edit() {
+    let w = Work::new("huge-heights");
+    // T4's header rows carry a ROWSPAN cell; make their heights overflow when summed.
+    let xml = w.contents();
+    let head = xml.rfind("<THEAD>").unwrap();
+    let (before, after) = xml.split_at(head);
+    let huge = "<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"9223372036854775807\">";
+    let after = after.replacen("<TR ACOPY=\"Y\" ADELETE=\"Y\" HEIGHT=\"30\">", huge, 2);
+    let v = w.variant("v.dsd", &[before, &after].concat());
+    let o = w.path("o.dsd");
+    set_cell(&v, &o, "3", "3", "2", "1,600,000").ok();
+    dsd(["check", &s(&o)]).ok();
+}
+
+#[test]
 fn structural_edits_handle_nested_tables() {
     let w = Work::new("nested");
     let nested = "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">기타
