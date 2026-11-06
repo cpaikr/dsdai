@@ -742,6 +742,28 @@ fn tables_and_paragraphs_copy_insert_and_delete() {
 }
 
 #[test]
+fn structural_edits_refuse_out_of_range_sizes() {
+    let w = Work::new("huge-size");
+    let v = w.variant(
+        "v.dsd",
+        &replace_once(
+            &w.contents(),
+            "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">홍길동",
+            "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"9223372036854775807\">홍길동",
+        ),
+    );
+    let (src, o) = (s(&v), s(&w.path("o.dsd")));
+    for args in [
+        vec!["copy-row", &src, "--table", "4", "--row", "3", "--count", "1000", "-o", &o],
+        vec!["copy-col", &src, "--table", "4", "--col", "2", "-o", &o],
+        vec!["delete-row", &src, "--table", "4", "--row", "3", "-o", &o],
+    ] {
+        let e = dsd(&args).fails("invalid_argument");
+        assert!(e["message"].as_str().unwrap().contains("beyond"), "{e}");
+    }
+}
+
+#[test]
 fn structural_edits_handle_nested_tables() {
     let w = Work::new("nested");
     let nested = "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">기타

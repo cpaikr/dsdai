@@ -157,6 +157,12 @@ fn cleared_note(kept: &[String]) -> String {
     if kept.is_empty() { " (cleared)".into() } else { format!(" (cleared; {})", kept.join(", ")) }
 }
 
+/// Largest magnitude of a size attribute a structural edit accepts. Real
+/// pixel sizes are in the thousands; this bound keeps every recomputed size
+/// (a span grown by `MAX_COPIES` rows or columns, a table width over the
+/// grid's columns) far inside `i64`, so no size arithmetic can overflow.
+const MAX_SIZE: i64 = 1_000_000;
+
 fn verified_table(doc: &Doc, table_no: usize) -> Result<&Table> {
     let table = doc.table(table_no)?;
     require_verified(doc, table.node, &format!("T{table_no}"))?;
@@ -167,7 +173,25 @@ fn verified_table(doc: &Doc, table_no: usize) -> Result<&Table> {
         return Err(Error::refused(format!("T{table_no} has grid problems: {}", table.issues[0]))
             .with_hint("repair the table in DART Editor or by hand before structural edits"));
     }
+    check_sizes(doc, table)?;
     Ok(table)
+}
+
+/// Refuse a table whose HEIGHT/WIDTH values lie outside `MAX_SIZE`.
+fn check_sizes(doc: &Doc, table: &Table) -> Result<()> {
+    let colgroup = doc.tree.child_tag(table.node, "COLGROUP");
+    let sized = std::iter::once((table.node, "WIDTH"))
+        .chain(colgroup.map(|g| (g, "WIDTH")))
+        .chain(table.rows.iter().map(|&r| (r, "HEIGHT")))
+        .chain(table.cells.iter().flat_map(|c| [(c.node, "WIDTH"), (c.node, "HEIGHT")]));
+    let out_of_range = |v: i64| v.unsigned_abs() > MAX_SIZE.unsigned_abs();
+    if table.cols.iter().any(|&w| out_of_range(w))
+        || sized.into_iter().any(|(n, name)| int_of(doc, n, name).is_some_and(out_of_range))
+    {
+        return Err(Error::invalid(format!("T{} has a HEIGHT or WIDTH beyond {MAX_SIZE}", table.index))
+            .with_hint("repair the size in DART Editor or by hand before structural edits"));
+    }
+    Ok(())
 }
 
 fn check_row(table: &Table, row: usize) -> Result<()> {
