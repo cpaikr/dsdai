@@ -204,7 +204,7 @@ fn release_archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
     for (name, bytes) in entries {
         let mut header = tar::Header::new_ustar();
         header.set_size(bytes.len() as u64);
-        header.set_mode(0o755);
+        header.set_mode(if *name == "LICENSE.md" { 0o644 } else { 0o755 });
         builder.append_data(&mut header, name, *bytes).unwrap();
     }
     builder.into_inner().unwrap().finish().unwrap()
@@ -215,7 +215,7 @@ fn this_build() -> Vec<u8> {
 }
 
 fn this_archive() -> Vec<u8> {
-    release_archive(&[(EXECUTABLE, &this_build())])
+    release_archive(&[("LICENSE.md", b"license"), (EXECUTABLE, &this_build())])
 }
 
 /// The single JSON envelope; stderr is empty because it is not a terminal.
@@ -252,7 +252,7 @@ fn upgrade_replaces_a_managed_installation_and_its_receipt() {
     fixture.publish(CURRENT, &this_archive(), None);
 
     let checked = fixture.upgrade(&["--check"], Some(OLDER));
-    assert!(checked.status.success());
+    assert!(checked.status.success(), "{}", String::from_utf8_lossy(&checked.stdout));
     let checked = envelope(&checked);
     assert_eq!(checked["ok"], true);
     assert_eq!(checked["result"]["updateAvailable"], true);
@@ -262,7 +262,7 @@ fn upgrade_replaces_a_managed_installation_and_its_receipt() {
     assert_eq!(fixture.archive_requests(), 0, "--check downloads nothing");
 
     let upgraded = fixture.upgrade(&[], Some(OLDER));
-    assert!(upgraded.status.success());
+    assert!(upgraded.status.success(), "{}", String::from_utf8_lossy(&upgraded.stdout));
     let upgraded = envelope(&upgraded);
     assert_eq!(upgraded["result"]["runningVersion"], OLDER);
     assert_eq!(upgraded["result"]["installedVersion"], CURRENT);

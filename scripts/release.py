@@ -46,6 +46,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
+LICENSE = "LICENSE.md"
 TARGETS: List[dict] = json.loads((ROOT / "scripts" / "release-targets.json").read_text(encoding="utf-8"))
 REPOSITORY = "cpaikr/dsdai"
 INSTALLERS = ("install.sh", "install.ps1")
@@ -129,14 +130,15 @@ def archive_name(version: str, target: dict) -> str:
 
 
 def pack(entries: Dict[str, bytes]) -> bytes:
-    """A deterministic tar.gz: sorted names, mode 0755, zero mtime/uid/gid,
-    empty owner names, USTAR, and a gzip header without name or time."""
+    """A deterministic tar.gz: sorted names, mode 0644 for the license and 0755
+    otherwise, zero mtime/uid/gid, empty owner names, USTAR, and a gzip header
+    without name or time."""
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         for name in sorted(entries):
             info = tarfile.TarInfo(name)
             info.size = len(entries[name])
-            info.mode = 0o755
+            info.mode = 0o644 if name == LICENSE else 0o755
             info.mtime = 0
             info.uid = info.gid = 0
             info.uname = info.gname = ""
@@ -149,14 +151,18 @@ def pack(entries: Dict[str, bytes]) -> bytes:
 
 
 def archive_executable(data: bytes, target: dict) -> bytes:
-    """The executable from an archive holding exactly it as a regular file, the
-    same rule `dsd upgrade` and the installers enforce."""
+    """The executable from an archive holding exactly it and the license as
+    regular files, the same rule `dsd upgrade` and the installers enforce."""
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             members = tar.getmembers()
-            require([m.name for m in members] == [target["executable"]],
-                    f"Archive must contain exactly {target['executable']}, not {[m.name for m in members]}.")
-            member = members[0]
+            expected = sorted([target["executable"], LICENSE])
+            require([m.name for m in members] == expected,
+                    f"Archive must contain exactly {expected}, not {[m.name for m in members]}.")
+            license_member = next(m for m in members if m.name == LICENSE)
+            require(license_member.isreg() and license_member.mode & 0o777 == 0o644,
+                    "The archived license must be a regular file with mode 0644.")
+            member = next(m for m in members if m.name == target["executable"])
             require(member.isreg() and member.size > 0, "The archived executable must be a non-empty regular file.")
             require(member.mode & 0o777 == 0o755, "The archived executable must have mode 0755.")
             handle = tar.extractfile(member)
@@ -248,7 +254,7 @@ def build(target_id: str, out: Path, executable: Optional[Path]) -> dict:
         executable = ROOT / "target" / target["rustTarget"] / "release" / target["executable"]
     data = executable.read_bytes()
     glibc = verify_binary(data, target)
-    packed = pack({target["executable"]: data})
+    packed = pack({target["executable"]: data, LICENSE: (ROOT / LICENSE).read_bytes()})
     out.mkdir(parents=True, exist_ok=True)
     name = archive_name(version, target)
     (out / name).write_bytes(packed)

@@ -37,6 +37,7 @@ const MAX_CHECKSUMS_BYTES: usize = 64 << 10;
 // stopping a corrupt or hostile response early.
 const MAX_ARCHIVE_BYTES: usize = 64 << 20;
 const MAX_EXECUTABLE_BYTES: u64 = 128 << 20;
+const LICENSE_ENTRY: &str = "LICENSE.md";
 const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 const ARCHIVE_TIMEOUT: Duration = Duration::from_secs(300);
 const STAGED_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -369,27 +370,37 @@ fn checksum_entry(checksums: &[u8], archive: &str) -> Result<String, UpgradeErro
     }
 }
 
-/// The executable from an archive holding exactly it, as a regular file.
+/// The executable from an archive holding exactly it and the license, as regular files.
 fn executable_from_archive(archive: &[u8]) -> Result<Vec<u8>, UpgradeError> {
-    let invalid =
-        || verification_failed(format!("The release archive must contain exactly {EXECUTABLE} as a regular file."));
+    let invalid = || {
+        verification_failed(format!(
+            "The release archive must contain exactly {EXECUTABLE} and {LICENSE_ENTRY} as regular files."
+        ))
+    };
     let decoder = GzDecoder::new(archive).take(2 * MAX_EXECUTABLE_BYTES);
     let mut archive = tar::Archive::new(decoder);
     let mut executable = None;
+    let mut license = false;
     for entry in archive.entries().map_err(|_| invalid())? {
         let mut entry = entry.map_err(|_| invalid())?;
         if !entry.header().entry_type().is_file() || entry.size() > MAX_EXECUTABLE_BYTES {
             return Err(invalid());
         }
         let name = entry.path().ok().and_then(|path| path.to_str().map(str::to_owned)).ok_or_else(invalid)?;
-        if name != EXECUTABLE || executable.is_some() {
-            return Err(invalid());
+        match name.as_str() {
+            EXECUTABLE if executable.is_none() => {
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).map_err(|_| invalid())?;
+                executable = Some(bytes);
+            }
+            LICENSE_ENTRY if !license => license = true,
+            _ => return Err(invalid()),
         }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(|_| invalid())?;
-        executable = Some(bytes);
     }
-    executable.filter(|bytes| !bytes.is_empty()).ok_or_else(invalid)
+    match executable {
+        Some(bytes) if license && !bytes.is_empty() => Ok(bytes),
+        _ => Err(invalid()),
+    }
 }
 
 fn archive_name(version: Version, target: &str) -> String {
@@ -806,18 +817,21 @@ mod tests {
     }
 
     #[test]
-    fn archive_must_hold_exactly_the_executable() {
+    fn archive_must_hold_exactly_the_executable_and_license() {
         let file = tar::EntryType::Regular;
-        let valid = archive(&[(EXECUTABLE, b"binary", file)]);
+        let valid = archive(&[(LICENSE_ENTRY, b"license", file), (EXECUTABLE, b"binary", file)]);
         assert_eq!(executable_from_archive(&valid).unwrap(), b"binary");
         for invalid in [
             archive(&[]),
-            archive(&[("README.md", b"readme", file)]),
-            archive(&[(EXECUTABLE, b"binary", file), ("extra", b"x", file)]),
-            archive(&[(EXECUTABLE, b"binary", file), (EXECUTABLE, b"binary", file)]),
-            archive(&[(EXECUTABLE, b"", tar::EntryType::Symlink)]),
-            archive(&[(&format!("bin/{EXECUTABLE}"), b"binary", file)]),
-            archive(&[(EXECUTABLE, b"", file)]),
+            archive(&[(EXECUTABLE, b"binary", file)]),
+            archive(&[(LICENSE_ENTRY, b"license", file)]),
+            archive(&[("README.md", b"readme", file), (EXECUTABLE, b"binary", file)]),
+            archive(&[(LICENSE_ENTRY, b"license", file), (EXECUTABLE, b"binary", file), ("extra", b"x", file)]),
+            archive(&[(LICENSE_ENTRY, b"license", file), (EXECUTABLE, b"binary", file), (EXECUTABLE, b"binary", file)]),
+            archive(&[(LICENSE_ENTRY, b"license", file), (LICENSE_ENTRY, b"license", file), (EXECUTABLE, b"b", file)]),
+            archive(&[(LICENSE_ENTRY, b"license", file), (EXECUTABLE, b"", tar::EntryType::Symlink)]),
+            archive(&[(LICENSE_ENTRY, b"license", file), (&format!("bin/{EXECUTABLE}"), b"binary", file)]),
+            archive(&[(LICENSE_ENTRY, b"license", file), (EXECUTABLE, b"", file)]),
             b"not gzip".to_vec(),
         ] {
             assert_eq!(executable_from_archive(&invalid).unwrap_err().code, "upgrade_verification_failed");

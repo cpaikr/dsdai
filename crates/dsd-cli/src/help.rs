@@ -41,7 +41,7 @@ unmanaged_installation or upgrade_receipt_mismatch and is left unchanged.
 --check reports runningVersion, latestVersion, updateAvailable, distribution,
 and nextStep without downloading an archive. upgrade downloads this target's
 archive, verifies it against the release manifest and SHA256SUMS, requires it
-to hold only the executable, and requires the new executable to report the
+to hold only the executable and license, and requires the new executable to report the
 release version. The executable is replaced before its receipt; on failure the
 previous installation is restored, or error.hint names the remaining step.
 

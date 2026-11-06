@@ -108,7 +108,7 @@ $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
 if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) { throw "This installer requires the Windows-provided tar at $tar." }
 # The archive holds exactly one regular file: the executable.
 $entries = @(& $tar -tzf $Archive)
-if ($LASTEXITCODE -ne 0 -or ($entries -join "`n") -ne 'dsd.exe') { throw 'Unexpected archive contents.' }
+if ($LASTEXITCODE -ne 0 -or ($entries -join "`n") -ne "LICENSE.md`ndsd.exe") { throw 'Unexpected archive contents.' }
 $types = @(& $tar -tvzf $Archive)
 if ($LASTEXITCODE -ne 0 -or @($types | Where-Object { -not $_.StartsWith('-') }).Count -ne 0) { throw 'Archive must contain only regular files.' }
 $null = New-Item -ItemType Directory -Path $BinDirectory -Force
