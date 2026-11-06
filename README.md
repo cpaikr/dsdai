@@ -64,9 +64,8 @@ produces `target/release/dsd`.
 
 ## Installation
 
-> **Not yet available.** These instructions apply from the first release,
-> v0.1.0, which has not been published. Until then there is no `dsd` release
-> to download; build from a checkout with `cargo build --release -p dsd-cli`.
+These instructions apply to releases from
+[v0.1.0](https://github.com/cpaikr/dsdai/releases/tag/v0.1.0), the first.
 
 Download the archive for your platform, `SHA256SUMS`, and the matching
 installer from the same [GitHub Release](https://github.com/cpaikr/dsdai/releases).
