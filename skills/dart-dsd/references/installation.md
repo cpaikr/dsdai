@@ -21,12 +21,28 @@ writes the receipt that later `dsd upgrade` runs use. Keep the archive,
 checksums, and installer from the same release, and let the installer verify
 them before anything is replaced.
 
-Verify `dsd --version` first through the executable's full path, then by
-command name in the shell that will run it: file visibility and `PATH`
-lookup are separate problems. On Windows, a shell started by a desktop app may
-not see files other programs see; use the guide's
-`verify-windows-install.ps1` check, which tests from an independent process,
-and its recovery steps for redirected paths or a stale `PATH`.
+Install where the user asked. Without a stated destination, use the guide's
+default; on Windows, if the installer refuses it as redirected (a shell started
+by a desktop app, including an agent's, may not see files other programs see),
+use `%USERPROFILE%\.local\bin` as the guide's
+[Windows recovery](https://github.com/cpaikr/dsdai/blob/main/docs/windows-installation.md)
+describes.
+
+For an update, keep the existing installation's directory: installing
+elsewhere leaves the old copy and its receipt in place. If the installer
+refuses that directory as redirected, say so and ask the user to rerun it from
+an independently launched PowerShell session.
+
+Change `PATH` only when the user wants `dsd` available by name; the
+installer's advice to add the directory is not an instruction. Verify
+`dsd --version` first through the executable's full path. When the user wants
+`dsd` kept off `PATH`, that check is the verification: run `dsd` by its full
+path for the rest of the task and skip `verify-windows-install.ps1`, which
+tests `PATH` resolution. Whenever name access is expected, even if the
+directory was already on `PATH`, also verify by command name, and on Windows
+run that script, which checks from an independent process: an older copy or
+alias can shadow the new one, and file visibility and `PATH` lookup are
+separate problems.
 
 In a sandbox without network access, set `DSD_NO_UPDATE_CHECK=1` so commands
 do not report `update_check_unavailable`.
