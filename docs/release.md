@@ -138,8 +138,10 @@ tag or reuse a published version.
    ```
 
 2. **Version commit.** In a PR, set `[workspace.package] version`, run
-   `cargo update -w` so `Cargo.lock` follows, update the README's release
-   status line, and run `python scripts/check.py`. Merge after CI succeeds.
+   `cargo update -w` so `Cargo.lock` follows, and run
+   `python scripts/check.py`. Merge after CI succeeds. Leave the README's
+   release status alone until step 7, so `main` never names an unpublished
+   release.
 
 3. **Exact-commit CI.** Release requires a successful CI run dispatched by
    `sjunepark` on `main` whose head SHA is the tagged commit. PR runs do not
@@ -187,6 +189,9 @@ tag or reuse a published version.
    installation or run `dsd upgrade` from the previous release, then
    `dsd version --check`. On Windows desktops, record
    `verify-windows-install.ps1` output from an independent process.
+
+7. **Record the release.** In a PR, point the README installation guide and
+   this runbook at the published version, then merge it.
 
 ## Recovery
 
