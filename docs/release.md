@@ -193,7 +193,6 @@ tag or reuse a published version.
 7. **Record the release.** In a PR, point the README installation guide and
    this runbook at the published version, then merge it.
 
-
 ## Recovery
 
 The release operator owns failures:
