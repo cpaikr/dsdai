@@ -837,6 +837,48 @@ fn compare_never_writes_over_its_inputs() {
 }
 
 #[test]
+fn compare_pairs_tables_that_moved() {
+    let w = Work::new("compare-moved");
+    let xml = w.contents();
+    // Swap T3 and T4, changing one figure in T4: T3 anchors the alignment,
+    // so the two copies of T4 fall on different sides of it.
+    let t3 = xml.find("<TABLE ACLASS=\"NORMAL\" AFIXTABLE=\"N\" BORDER=\"1\" WIDTH=\"626\">").unwrap();
+    let t3_end = t3 + xml[t3..].find("</TABLE>").unwrap() + "</TABLE>".len();
+    let t4 = xml.rfind("<TABLE ACLASS=\"NORMAL\" AFIXTABLE=\"N\" BORDER=\"1\" WIDTH=\"600\">").unwrap();
+    let t4_end = t4 + xml[t4..].find("</TABLE>").unwrap() + "</TABLE>".len();
+    assert!(t3_end < t4);
+    let changed_t4 = xml[t4..t4_end].replace(">60,000<", ">61,000<");
+    let swapped = [&xml[..t3], &changed_t4, &xml[t3_end..t4], &xml[t3..t3_end], &xml[t4_end..]].concat();
+    let other = w.variant("other.dsd", &swapped);
+    let r = dsd(["compare", &s(&w.src()), &s(&other)]).ok();
+    let items = r["items"].as_array().unwrap();
+    let moved = items.iter().find(|i| i["base"]["table"] == 4).unwrap();
+    assert_eq!((moved["status"].as_str(), moved["moved"].as_bool()), (Some("changed"), Some(true)));
+    assert_eq!(moved["other"]["table"], 3);
+    assert_eq!(moved["cells"][0]["delta"], "+1,000");
+    assert!(items.iter().all(|i| i["kind"] != "table" || i["base"].is_object() && i["other"].is_object()), "{r}");
+    assert_eq!(r["summary"]["movedTables"], 1);
+}
+
+#[test]
+fn compare_keeps_nested_table_cells_apart() {
+    let w = Work::new("compare-nested");
+    let nested = |a: &str, b: &str| {
+        format!(
+            "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">기타\r\n<TABLE BORDER=\"1\" WIDTH=\"200\">\r\n<COLGROUP WIDTH=\"200\">\r\n<COL WIDTH=\"100\"></COL>\r\n<COL WIDTH=\"100\"></COL>\r\n</COLGROUP>\r\n<TBODY>\r\n<TR HEIGHT=\"30\">\r\n<TD HEIGHT=\"23\" WIDTH=\"91\">갑</TD>\r\n<TD HEIGHT=\"23\" WIDTH=\"91\">{a}</TD>\r\n</TR>\r\n<TR HEIGHT=\"30\">\r\n<TD HEIGHT=\"23\" WIDTH=\"91\">을</TD>\r\n<TD HEIGHT=\"23\" WIDTH=\"91\">{b}</TD>\r\n</TR>\r\n</TBODY>\r\n</TABLE>\r\n</TD>"
+        )
+    };
+    let cell = "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">기타</TD>";
+    let base = w.variant("base.dsd", &replace_once(&w.contents(), cell, &nested("1", "23")));
+    let other = w.variant("other.dsd", &replace_once(&w.contents(), cell, &nested("12", "3")));
+    let r = dsd(["compare", &s(&base), &s(&other)]).ok();
+    assert_eq!(r["summary"]["valueChanges"], 2, "{r}");
+    let inner = r["items"].as_array().unwrap().iter().find(|i| i["base"]["table"] == 5).unwrap();
+    let deltas: Vec<&str> = inner["cells"].as_array().unwrap().iter().map(|c| c["delta"].as_str().unwrap()).collect();
+    assert_eq!(deltas, ["+11", "-20"]);
+}
+
+#[test]
 fn compare_aligns_by_content() {
     let w = Work::new("compare");
     // Other side: a value changed, a row inserted, a column added, a table and

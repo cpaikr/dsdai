@@ -22,6 +22,20 @@ fn layout_free(text: &str) -> String {
 ///
 /// Literal newlines in the XML are layout, not content, so they are dropped.
 pub fn node_text(tree: &Tree, node: NodeId, include_scaffold: bool) -> String {
+    text_of(tree, node, include_scaffold, true)
+}
+
+/// Placeholder for a nested table in [`node_text_outside_tables`].
+pub const NESTED_TABLE_MARK: &str = "[표]";
+
+/// Like [`node_text`] without scaffolding, but a table inside the node is
+/// replaced by [`NESTED_TABLE_MARK`] on its own line, so a nested table's
+/// cell boundaries are never flattened into the surrounding text.
+pub fn node_text_outside_tables(tree: &Tree, node: NodeId) -> String {
+    text_of(tree, node, false, false)
+}
+
+fn text_of(tree: &Tree, node: NodeId, include_scaffold: bool, nested_tables: bool) -> String {
     const BOUNDARY: char = '\u{1e}';
     let mut joined = String::new();
     for item in &tree.node(node).items {
@@ -32,12 +46,16 @@ pub fn node_text(tree: &Tree, node: NodeId, include_scaffold: bool) -> String {
                 if is_scaffold(tag) && !include_scaffold {
                     continue;
                 }
-                if BLOCK_TEXT_TAGS.contains(&tag) {
+                if tag == "TABLE" && !nested_tables {
                     joined.push(BOUNDARY);
-                    joined.push_str(&node_text(tree, *child, include_scaffold));
+                    joined.push_str(NESTED_TABLE_MARK);
+                    joined.push(BOUNDARY);
+                } else if BLOCK_TEXT_TAGS.contains(&tag) {
+                    joined.push(BOUNDARY);
+                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables));
                     joined.push(BOUNDARY);
                 } else {
-                    joined.push_str(&node_text(tree, *child, include_scaffold));
+                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables));
                 }
             }
         }

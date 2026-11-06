@@ -55,9 +55,10 @@ meaning, and tell the user which parts were unverified.
   line ranges and any other changed member; `--raw` adds the lines.
 - `dsd compare BASE OTHER` is for two versions that may differ in form or
   structure: a draft against the filed report, this quarter against the last.
-  Tables and paragraphs pair by content, rows by their label (footnote markers
-  and 주식회사/㈜ spellings ignored, moved rows detected), and columns by
-  header when the counts differ. Each item is `same`, `changed`, `onlyBase`,
+  Tables and paragraphs pair by content (a reordered table is paired and
+  marked `moved`; a table inside a cell is compared as a table of its own),
+  rows by their label (footnote markers and 주식회사/㈜ spellings ignored,
+  moved rows detected), and columns by header when the counts differ. Each item is `same`, `changed`, `onlyBase`,
   or `onlyOther` under the base document's section (note) heading; cell
   changes are `value` (with `delta` = OTHER − BASE), `text`, or `format` (the
   same number or label written differently). JSON lists only differences

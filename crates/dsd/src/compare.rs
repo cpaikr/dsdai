@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::difflib::{Matcher, Tag};
 use crate::doc::{BLOCK_TEXT_TAGS, Doc, Table, is_scaffold};
-use crate::text::{collapse, compact, header_info, node_text, prefix};
+use crate::text::{collapse, compact, header_info, node_text, node_text_outside_tables as own_text, prefix};
 use crate::xml::NodeId;
 
 // ---------------------------------------------------------------------------
@@ -79,6 +79,24 @@ fn units(doc: &Doc) -> Vec<Unit> {
                 None => self.region.clone(),
             }
         }
+        /// Tables inside `node` (in a cell or a paragraph) follow it as units
+        /// of their own; the enclosing text shows only a placeholder for them.
+        fn nested_tables(&mut self, node: NodeId) {
+            let doc = self.doc;
+            for n in doc.tree.iter_tag(node, "TABLE").into_iter().filter(|&n| n != node) {
+                if let Some(t) = doc.table_for_node(n) {
+                    let section = self.section();
+                    self.out.push(Unit {
+                        table: Some(t.index),
+                        node: n,
+                        tag: "TABLE".into(),
+                        text: String::new(),
+                        line: doc.line(doc.tree.node(n).start),
+                        section,
+                    });
+                }
+            }
+        }
         fn walk(&mut self, node: NodeId) {
             let doc = self.doc;
             let tree = &doc.tree;
@@ -98,9 +116,15 @@ fn units(doc: &Doc) -> Vec<Unit> {
                         line,
                         section,
                     });
+                    self.nested_tables(child);
                 } else if BLOCK_TEXT_TAGS.contains(&tag) {
-                    let text = node_text(tree, child, false);
+                    let text = own_text(tree, child);
                     if compact(&text).is_empty() {
+                        continue;
+                    }
+                    if compact(&text) == crate::text::NESTED_TABLE_MARK {
+                        // A wrapper around a table only: its tables are the content.
+                        self.nested_tables(child);
                         continue;
                     }
                     // A heading on the first line opens its paragraph's note; one
@@ -121,6 +145,7 @@ fn units(doc: &Doc) -> Vec<Unit> {
                     }
                     let section = self.section();
                     self.out.push(Unit { table: None, node: child, tag: tag.into(), text, line, section });
+                    self.nested_tables(child);
                     if later.is_some() {
                         self.note = later;
                     }
@@ -482,6 +507,9 @@ pub struct Item {
     pub columns: Vec<ColumnChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextChange>,
+    /// The pair sits at different places in the two documents (a reordered table).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub moved: bool,
     #[serde(skip)]
     pub alignment: Option<TableAlignment>,
     #[serde(skip)]
@@ -505,6 +533,7 @@ pub struct Summary {
     pub format_changes: usize,
     pub row_changes: usize,
     pub column_changes: usize,
+    pub moved_tables: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -519,51 +548,59 @@ pub struct Comparison {
 // ---------------------------------------------------------------------------
 // table comparison
 
-struct Grid {
-    /// Origin text at each 0-based (row, col); `None` where a span covers it.
-    cells: Vec<Vec<Option<String>>>,
-    /// Text of whichever cell covers each position, for header labels.
-    covering: Vec<Vec<String>>,
+/// A table's cells on its grid. Each cell's text is extracted once; a span
+/// shares it across the positions it covers, so wide spans cost no extra text.
+struct Grid<'t> {
+    table: &'t Table,
+    /// Text of each cell, by its index in `Table::cells`.
+    texts: Vec<String>,
+    rows: usize,
     header_rows: usize,
 }
 
-fn grid(doc: &Doc, t: &Table) -> Grid {
+impl Grid<'_> {
+    /// Text of the cell that starts at a 0-based position; `None` where a span covers it.
+    fn origin(&self, r: usize, c: usize) -> Option<&str> {
+        let i = (*self.table.grid.get(r)?.get(c)?)?;
+        let cell = &self.table.cells[i];
+        ((cell.row, cell.col) == (r + 1, c + 1)).then(|| self.texts[i].as_str())
+    }
+
+    /// Text of whichever cell covers a 0-based position, for labels.
+    fn covering(&self, r: usize, c: usize) -> &str {
+        self.table.grid.get(r).and_then(|row| row.get(c)).copied().flatten().map_or("", |i| self.texts[i].as_str())
+    }
+
+    fn row(&self, r: usize) -> impl Iterator<Item = &str> {
+        (0..self.table.ncols()).filter_map(move |c| self.origin(r, c))
+    }
+}
+
+fn grid<'t>(doc: &Doc, t: &'t Table) -> Grid<'t> {
     let tree = &doc.tree;
     if t.oversized || t.grid.len() != t.rows.len() {
         // No usable grid (oversized or irregular): compare the table as a whole only.
-        return Grid { cells: Vec::new(), covering: Vec::new(), header_rows: 0 };
+        return Grid { table: t, texts: Vec::new(), rows: 0, header_rows: 0 };
     }
-    let (nr, nc) = (t.rows.len(), t.ncols());
-    let mut cells = vec![vec![None; nc]; nr];
-    let mut covering = vec![vec![String::new(); nc]; nr];
-    for r in 0..nr {
-        for c in 0..nc {
-            if let Some(cell) = t.cell_at_grid(r, c) {
-                let text = node_text(tree, cell.node, false);
-                if (cell.row, cell.col) == (r + 1, c + 1) {
-                    cells[r][c] = Some(text.clone());
-                }
-                covering[r][c] = text;
-            }
-        }
-    }
+    let texts = t.cells.iter().map(|c| own_text(tree, c.node)).collect();
+    let nr = t.rows.len();
     let thead = t.rows.iter().take_while(|&&r| tree.node(r).parent.is_some_and(|p| tree.tag(p) == "THEAD")).count();
     let header_rows = if thead > 0 { thead } else { nr.min(2) };
-    Grid { cells, covering, header_rows }
+    Grid { table: t, texts, rows: nr, header_rows }
 }
 
 fn row_key(g: &Grid, r: usize) -> String {
-    g.cells[r].iter().flatten().map(|t| match_key(t)).find(|k| !k.is_empty()).unwrap_or_default()
+    g.row(r).map(match_key).find(|k| !k.is_empty()).unwrap_or_default()
 }
 
 fn row_label(g: &Grid, r: usize) -> String {
-    let text = g.covering[r].iter().map(|t| collapse(t)).find(|t| !t.is_empty()).unwrap_or_default();
+    let text = (0..g.table.ncols()).map(|c| collapse(g.covering(r, c))).find(|t| !t.is_empty()).unwrap_or_default();
     prefix(&text, 60)
 }
 
 fn col_header(g: &Grid, c: usize) -> String {
     let parts: Vec<String> = (0..g.header_rows)
-        .map(|r| collapse(&g.covering[r][c]))
+        .map(|r| collapse(g.covering(r, c)))
         .filter(|t| !t.is_empty() && parse_number(t).is_none())
         .collect();
     let mut out: Vec<String> = Vec::new();
@@ -576,10 +613,7 @@ fn col_header(g: &Grid, c: usize) -> String {
 }
 
 fn row_text(g: &Grid, r: usize) -> String {
-    prefix(
-        &g.cells[r].iter().flatten().map(|t| collapse(t)).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" | "),
-        160,
-    )
+    prefix(&g.row(r).map(collapse).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" | "), 160)
 }
 
 fn cell_change(base: &str, other: &str) -> Option<(CellKind, Option<String>)> {
@@ -610,8 +644,8 @@ fn cell_change(base: &str, other: &str) -> Option<(CellKind, Option<String>)> {
 
 fn compare_tables(bdoc: &Doc, bt: &Table, odoc: &Doc, ot: &Table, item: &mut Item) {
     let (bg, og) = (grid(bdoc, bt), grid(odoc, ot));
-    let bk: Vec<String> = (0..bg.cells.len()).map(|r| row_key(&bg, r)).collect();
-    let ok: Vec<String> = (0..og.cells.len()).map(|r| row_key(&og, r)).collect();
+    let bk: Vec<String> = (0..bg.rows).map(|r| row_key(&bg, r)).collect();
+    let ok: Vec<String> = (0..og.rows).map(|r| row_key(&og, r)).collect();
     let mut rows = pair_keys(&bk, &ok);
     // A row that moved: unpaired on both sides with the same key.
     let mut moved = HashSet::new();
@@ -686,20 +720,20 @@ fn compare_tables(bdoc: &Doc, bt: &Table, odoc: &Doc, ot: &Table, item: &mut Ite
                 }
                 for &bc in &bcols {
                     let oc = cols[&bc];
-                    let (a, b) = (&bg.cells[i][bc - 1], &og.cells[j][oc - 1]);
+                    let (a, b) = (bg.origin(i, bc - 1), og.origin(j, oc - 1));
                     if a.is_none() && b.is_none() {
                         continue;
                     }
-                    let (at, bt_) = (a.clone().unwrap_or_default(), b.clone().unwrap_or_default());
-                    if let Some((kind, d)) = cell_change(&at, &bt_) {
+                    let (at, bt_) = (a.unwrap_or_default(), b.unwrap_or_default());
+                    if let Some((kind, d)) = cell_change(at, bt_) {
                         item.cells.push(CellChange {
                             kind,
                             base: format!("R{}C{bc}", i + 1),
                             other: format!("R{}C{oc}", j + 1),
                             row_label: row_label(&bg, i),
                             column: col_header(&bg, bc - 1),
-                            base_text: at,
-                            other_text: bt_,
+                            base_text: at.to_owned(),
+                            other_text: bt_.to_owned(),
                             delta: d,
                         });
                         changed.push(((i + 1, bc), (j + 1, oc)));
@@ -788,7 +822,7 @@ fn features(doc: &Doc, u: &Unit) -> Features {
         let mut cells: HashMap<String, usize> = HashMap::new();
         let mut all = Vec::new();
         for c in &t.cells {
-            let k = compact(&node_text(&doc.tree, c.node, false));
+            let k = compact(&own_text(&doc.tree, c.node));
             all.push(k.clone());
             if !k.is_empty() {
                 *cells.entry(k).or_default() += 1;
@@ -798,7 +832,7 @@ fn features(doc: &Doc, u: &Unit) -> Features {
             .cells
             .iter()
             .filter(|c| c.row == 1)
-            .map(|c| compact(&node_text(&doc.tree, c.node, false)))
+            .map(|c| compact(&own_text(&doc.tree, c.node)))
             .collect::<Vec<_>>()
             .join("|");
         let total = cells.values().sum();
@@ -912,15 +946,66 @@ fn align_region(
     }
 }
 
+/// Least similarity for pairing tables the alignment left one-sided.
+const MOVED_SIMILARITY: f64 = 0.6;
+
+/// Pair tables that moved past an anchor. Order-preserving alignment cannot
+/// pair `[A, B]` with `[B', A]`: A anchors, and B and B' fall into different
+/// regions. Pair such one-sided tables by similarity across the whole
+/// document; the pair takes the base table's place. Returns the base units
+/// paired this way.
+fn pair_moved_tables(
+    fa: &[Features],
+    ua: &[Unit],
+    fb: &[Features],
+    ub: &[Unit],
+    pairs: &mut Vec<(Option<usize>, Option<usize>)>,
+) -> HashSet<usize> {
+    let lefts: Vec<usize> = (0..pairs.len())
+        .filter(|&k| matches!(pairs[k], (Some(i), None) if ua[i].table.is_some() && fa[i].size >= MIN_ANCHOR_SIZE))
+        .collect();
+    let rights: Vec<usize> = (0..pairs.len())
+        .filter(|&k| matches!(pairs[k], (None, Some(j)) if ub[j].table.is_some() && fb[j].size >= MIN_ANCHOR_SIZE))
+        .collect();
+    let mut moved = HashSet::new();
+    if lefts.is_empty() || rights.is_empty() || lefts.len() * rights.len() > MAX_PAIRING_WORK {
+        return moved;
+    }
+    let mut cand: Vec<(f64, usize, usize)> = Vec::new();
+    for &l in &lefts {
+        let i = pairs[l].0.expect("left entry");
+        for &r in &rights {
+            let j = pairs[r].1.expect("right entry");
+            let sim = similarity(&fa[i], &ua[i], &fb[j], &ub[j]);
+            if sim >= MOVED_SIMILARITY {
+                cand.push((sim, l, r));
+            }
+        }
+    }
+    cand.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    let (mut used_l, mut used_r) = (HashSet::new(), HashSet::new());
+    for (_, l, r) in cand {
+        if used_l.contains(&l) || used_r.contains(&r) {
+            continue;
+        }
+        used_l.insert(l);
+        used_r.insert(r);
+        pairs[l].1 = pairs[r].1;
+        moved.insert(pairs[l].0.expect("left entry"));
+    }
+    let mut k = 0;
+    pairs.retain(|_| {
+        k += 1;
+        !used_r.contains(&(k - 1))
+    });
+    moved
+}
+
 fn location(doc: &Doc, u: &Unit) -> Location {
     let label = match u.table {
         Some(index) => {
             let t = &doc.tables[index - 1];
-            t.cells
-                .iter()
-                .map(|c| collapse(&node_text(&doc.tree, c.node, false)))
-                .find(|s| !s.is_empty())
-                .unwrap_or_default()
+            t.cells.iter().map(|c| collapse(&own_text(&doc.tree, c.node))).find(|s| !s.is_empty()).unwrap_or_default()
         }
         None => collapse(&u.text),
     };
@@ -961,6 +1046,7 @@ pub fn compare(base_file: &str, base: &Doc, other_file: &str, other: &Doc) -> Co
             align_region(&fa[i1..i2], &ua[i1..i2], &fb[j1..j2], &ub[j1..j2], &mut pairs, i1, j1);
         }
     }
+    let moved = pair_moved_tables(&fa, &ua, &fb, &ub, &mut pairs);
     let mut items = Vec::new();
     let mut summary = Summary::default();
     // Sections follow the base document; an item only the other side has is
@@ -987,6 +1073,7 @@ pub fn compare(base_file: &str, base: &Doc, other_file: &str, other: &Doc) -> Co
             rows: Vec::new(),
             columns: Vec::new(),
             text: None,
+            moved: i.is_some_and(|i| moved.contains(&i)),
             alignment: None,
             base_node: a.map(|a| a.node),
             other_node: b.map(|b| b.node),
@@ -1009,6 +1096,10 @@ pub fn compare(base_file: &str, base: &Doc, other_file: &str, other: &Doc) -> Co
             }
             (Some(_), None) => item.status = Status::OnlyBase,
             _ => item.status = Status::OnlyOther,
+        }
+        if item.moved {
+            item.status = Status::Changed;
+            summary.moved_tables += 1;
         }
         summary.items += 1;
         match item.status {
@@ -1068,7 +1159,7 @@ pub fn render_text(c: &Comparison, items: &[&Item]) -> String {
     let s = &c.summary;
     let _ = writeln!(
         out,
-        "# {} items: {} same, {} changed, {} only in base, {} only in other; {} value, {} text, {} format cell change(s), {} row change(s)",
+        "# {} items: {} same, {} changed, {} only in base, {} only in other; {} value, {} text, {} format cell change(s), {} row change(s), {} moved table(s)",
         s.items,
         s.same,
         s.changed,
@@ -1077,7 +1168,8 @@ pub fn render_text(c: &Comparison, items: &[&Item]) -> String {
         s.value_changes,
         s.text_cell_changes,
         s.format_changes,
-        s.row_changes
+        s.row_changes,
+        s.moved_tables
     );
     let mut section = None;
     for item in items {
@@ -1088,10 +1180,11 @@ pub fn render_text(c: &Comparison, items: &[&Item]) -> String {
         let label = item.base.as_ref().or(item.other.as_ref()).map(|l| l.label.clone()).unwrap_or_default();
         let _ = writeln!(
             out,
-            "{} {} <-> {}  {}",
+            "{} {} <-> {}{}  {}",
             status_mark(item.status),
             loc_label(item.base.as_ref()),
             loc_label(item.other.as_ref()),
+            if item.moved { " (moved)" } else { "" },
             prefix(&label, 60)
         );
         for col in &item.columns {
@@ -1278,7 +1371,7 @@ fn render_table(doc: &Doc, table: &Table, marks: Option<&CellMarks>) -> String {
                 }
             }
             let mut style = css_align(doc, node);
-            let text = node_text(tree, node, false);
+            let text = own_text(tree, node);
             if parse_number(&text).is_some() {
                 style.push_str("white-space:nowrap;");
             }
@@ -1330,7 +1423,7 @@ fn render_block(doc: &Doc, node: NodeId, item: &Item, base_side: bool) -> String
         _ => "p",
     };
     let style = css_align(doc, node);
-    let text = node_text(tree, node, false);
+    let text = own_text(tree, node);
     let counterpart = item.text.as_ref().map(|t| if base_side { t.other.as_str() } else { t.base.as_str() });
     format!("<div class=\"{class}\" style=\"{style}\">{}</div>", render_words(&text, counterpart, base_side))
 }
@@ -1339,7 +1432,7 @@ fn render_side(doc: &Doc, node: Option<NodeId>, item: &Item, index: usize, base_
     let Some(node) = node else { return "<div class=\"empty\"></div>".to_owned() };
     if let Some(t) = doc.table_for_node(node) {
         let m = marks(item, index, base_side);
-        let label = format!("T{}", t.index);
+        let label = if item.moved { format!("T{} · moved", t.index) } else { format!("T{}", t.index) };
         format!("<div class=\"loc\">{label}</div><div class=\"tw\">{}</div>", render_table(doc, t, Some(&m)))
     } else {
         render_block(doc, node, item, base_side)
