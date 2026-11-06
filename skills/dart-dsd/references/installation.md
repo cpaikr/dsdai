@@ -28,14 +28,21 @@ use `%USERPROFILE%\.local\bin` as the guide's
 [Windows recovery](https://github.com/cpaikr/dsdai/blob/main/docs/windows-installation.md)
 describes.
 
+For an update, keep the existing installation's directory: installing
+elsewhere leaves the old copy and its receipt in place. If the installer
+refuses that directory as redirected, say so and ask the user to rerun it from
+an independently launched PowerShell session.
+
 Change `PATH` only when the user wants `dsd` available by name; the
 installer's advice to add the directory is not an instruction. Verify
-`dsd --version` first through the executable's full path. When `PATH` is left
-alone, that check is the verification: run `dsd` by its full path for the rest
-of the task and skip `verify-windows-install.ps1`, which tests `PATH`
-resolution. Otherwise also verify by command name, and on Windows run that
-script, which checks from an independent process; file visibility and `PATH`
-lookup are separate problems.
+`dsd --version` first through the executable's full path. When the user wants
+`dsd` kept off `PATH`, that check is the verification: run `dsd` by its full
+path for the rest of the task and skip `verify-windows-install.ps1`, which
+tests `PATH` resolution. Whenever name access is expected, even if the
+directory was already on `PATH`, also verify by command name, and on Windows
+run that script, which checks from an independent process: an older copy or
+alias can shadow the new one, and file visibility and `PATH` lookup are
+separate problems.
 
 In a sandbox without network access, set `DSD_NO_UPDATE_CHECK=1` so commands
 do not report `update_check_unavailable`.
