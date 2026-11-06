@@ -12,8 +12,9 @@ use serde_json::Value;
 
 use crate::archive::{Archive, CONTENTS, archive_bytes, atomic_write, guard_output, read_archive};
 use crate::check::{Issue, Level, check_archive, line_ending_issue, unit_value_conflict};
-use crate::doc::{Doc, Table, is_cell, is_scaffold, is_verified};
+use crate::doc::{Doc, is_scaffold, is_verified};
 use crate::error::{Error, ErrorCode, RAW_ROUTE, Result};
+use crate::structure;
 use crate::text::{node_text, quote, require_verified, unverified_nodes, unverified_schema};
 use crate::views::leaf_for_text;
 use crate::xml::NodeId;
@@ -28,12 +29,12 @@ pub struct Change {
 }
 
 impl Change {
-    fn new(op: &'static str, summary: String) -> Self {
+    pub(crate) fn new(op: &'static str, summary: String) -> Self {
         Self { op, summary, notes: Vec::new() }
     }
 }
 
-type Splice = (usize, usize, Vec<u8>);
+pub(crate) type Splice = (usize, usize, Vec<u8>);
 
 /// Escape text for character data; newlines become DART's `&cr;` token.
 pub fn xml_escape_text(text: &str) -> String {
@@ -42,7 +43,7 @@ pub fn xml_escape_text(text: &str) -> String {
     escaped.replace('\n', "&amp;cr;")
 }
 
-fn replace_ranges(data: &[u8], mut edits: Vec<Splice>) -> Result<Vec<u8>> {
+pub(crate) fn replace_ranges(data: &[u8], mut edits: Vec<Splice>) -> Result<Vec<u8>> {
     edits.sort_by_key(|e| e.0);
     if edits.windows(2).any(|w| w[1].0 < w[0].1) {
         return Err(Error::invalid("internal error: overlapping edits"));
@@ -58,7 +59,7 @@ fn replace_ranges(data: &[u8], mut edits: Vec<Splice>) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn is_ascii_space(b: u8) -> bool {
+pub(crate) fn is_ascii_space(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
 }
 
@@ -67,12 +68,12 @@ fn trim_ascii_end(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-fn is_blank(bytes: &[u8]) -> bool {
+pub(crate) fn is_blank(bytes: &[u8]) -> bool {
     bytes.iter().all(|&b| is_ascii_space(b))
 }
 
 /// Set (or add) a double-quoted attribute inside the start tag `tag`.
-fn set_attr_in_tag(tag: &[u8], name: &str, value: &str) -> Vec<u8> {
+pub(crate) fn set_attr_in_tag(tag: &[u8], name: &str, value: &str) -> Vec<u8> {
     let escaped = value.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;");
     let name = name.as_bytes();
     // First ` NAME = "value"` occurrence: whitespace, name, optional spaces, =, optional spaces, quote.
@@ -88,11 +89,12 @@ fn set_attr_in_tag(tag: &[u8], name: &str, value: &str) -> Vec<u8> {
                 while j < tag.len() && is_ascii_space(tag[j]) {
                     j += 1;
                 }
-                if tag.get(j) == Some(&b'"')
-                    && let Some(close) = tag[j + 1..].iter().position(|&b| b == b'"')
+                if let Some(&quote @ (b'"' | b'\'')) = tag.get(j)
+                    && let Some(close) = tag[j + 1..].iter().position(|&b| b == quote)
                 {
                     let (vs, ve) = (j + 1, j + 1 + close);
-                    return [&tag[..vs], escaped.as_bytes(), &tag[ve..]].concat();
+                    let value = if quote == b'\'' { escaped.replace('\'', "&apos;") } else { escaped };
+                    return [&tag[..vs], value.as_bytes(), &tag[ve..]].concat();
                 }
             }
         }
@@ -102,7 +104,7 @@ fn set_attr_in_tag(tag: &[u8], name: &str, value: &str) -> Vec<u8> {
     [&tag[..insert_at], b" ", name, b"=\"", escaped.as_bytes(), b"\"", &tag[insert_at..]].concat()
 }
 
-fn set_attr(data: &[u8], doc: &Doc, node: NodeId, name: &str, value: &str) -> Splice {
+pub(crate) fn set_attr(data: &[u8], doc: &Doc, node: NodeId, name: &str, value: &str) -> Splice {
     let n = doc.tree.node(node);
     (n.start, n.open_end, set_attr_in_tag(&data[n.start..n.open_end], name, value))
 }
@@ -201,7 +203,7 @@ pub fn set_cell(
 ///
 /// Ranges come from the parsed tree, so tags and attribute values are never
 /// included; editor scaffolding is skipped.
-fn text_runs(doc: &Doc, node: NodeId, out: &mut Vec<(usize, usize)>) {
+pub(crate) fn text_runs(doc: &Doc, node: NodeId, out: &mut Vec<(usize, usize)>) {
     let tree = &doc.tree;
     let n = tree.node(node);
     if is_scaffold(&n.tag) || n.close_start == n.open_end {
@@ -314,24 +316,46 @@ fn reference_len(rest: &[u8]) -> Option<usize> {
     ok.then_some(body_end + 1)
 }
 
-fn text_hits(doc: &Doc, old: &str, root: NodeId) -> Vec<(usize, usize)> {
-    let needle: Vec<char> = old.replace("\r\n", "\n").replace('\r', "\n").chars().collect();
+fn chars_of(text: &str) -> Vec<char> {
+    text.replace("\r\n", "\n").replace('\r', "\n").chars().collect()
+}
+
+/// Start positions of `needle` in `chars`, non-overlapping, left to right.
+fn positions(chars: &[char], needle: &[char]) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while !needle.is_empty() && pos + needle.len() <= chars.len() {
+        if chars[pos..pos + needle.len()] == needle[..] {
+            out.push(pos);
+            pos += needle.len();
+        } else {
+            pos += 1;
+        }
+    }
+    out
+}
+
+/// Byte spans of `old` in the text runs under `root`, plus how many hits were
+/// skipped because they lie inside an occurrence of an `except` phrase.
+fn text_hits(doc: &Doc, old: &str, root: NodeId, except: &[String]) -> (Vec<(usize, usize)>, usize) {
+    let needle = chars_of(old);
+    let guards: Vec<Vec<char>> = except.iter().map(|e| chars_of(e)).filter(|e| !e.is_empty()).collect();
     let mut runs = Vec::new();
     text_runs(doc, root, &mut runs);
-    let mut hits = Vec::new();
+    let (mut hits, mut skipped) = (Vec::new(), 0);
     for (a, b) in runs {
         let (chars, spans) = decode_run(&doc.data, a, b);
-        let mut pos = 0;
-        while pos + needle.len() <= chars.len() {
-            if chars[pos..pos + needle.len()] == needle[..] {
-                hits.push((spans[pos].0, spans[pos + needle.len() - 1].1));
-                pos += needle.len();
+        let protected: Vec<(usize, usize)> =
+            guards.iter().flat_map(|g| positions(&chars, g).into_iter().map(move |p| (p, p + g.len()))).collect();
+        for pos in positions(&chars, &needle) {
+            if protected.iter().any(|&(s, e)| s <= pos && pos + needle.len() <= e) {
+                skipped += 1;
             } else {
-                pos += 1;
+                hits.push((spans[pos].0, spans[pos + needle.len() - 1].1));
             }
         }
     }
-    hits
+    (hits, skipped)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -351,9 +375,17 @@ pub struct ReplacePreview {
     pub old: String,
     pub scope: String,
     pub count: usize,
+    /// Occurrences left alone because they lie inside an `except` phrase.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub skipped: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unverified_schema: Option<String>,
     pub occurrences: Vec<Occurrence>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero(v: &usize) -> bool {
+    *v == 0
 }
 
 /// Lossy UTF-8 that drops broken sequences, as at a cut-off context window.
@@ -366,15 +398,22 @@ pub enum ReplaceOutcome {
     Edited(Vec<u8>, Change),
 }
 
+/// What `replace` changes and how it is guarded.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReplaceSpec<'a> {
+    pub old: &'a str,
+    pub new: &'a str,
+    /// Required number of replaced occurrences; `None` accepts any.
+    pub expect: Option<usize>,
+    pub table: Option<usize>,
+    /// Phrases whose occurrences keep any `old` inside them (분ㆍ반기 when 반기 becomes 분기).
+    pub except: &'a [String],
+    pub dry_run: bool,
+}
+
 /// Replace literal text inside text runs, guarded by an expected count.
-pub fn replace(
-    data: &[u8],
-    old: &str,
-    new: &str,
-    expect: Option<usize>,
-    table_no: Option<usize>,
-    dry_run: bool,
-) -> Result<ReplaceOutcome> {
+pub fn replace(data: &[u8], spec: &ReplaceSpec<'_>) -> Result<ReplaceOutcome> {
+    let ReplaceSpec { old, new, expect, table: table_no, except, dry_run } = *spec;
     if old.is_empty() {
         return Err(Error::invalid("--old must not be empty"));
     }
@@ -385,7 +424,7 @@ pub fn replace(
         None => (tree.first_tag(doc.root(), "BODY").unwrap_or(doc.root()), "document body".to_owned()),
     };
     let repl = xml_escape_text(new).into_bytes();
-    let hits = text_hits(&doc, old, root);
+    let (hits, skipped) = text_hits(&doc, old, root, except);
     let unit_cells: Vec<NodeId> = doc
         .tables
         .iter()
@@ -427,6 +466,7 @@ pub fn replace(
             old: old.to_owned(),
             scope,
             count: hits.len(),
+            skipped,
             unverified_schema: schema,
             occurrences,
         }));
@@ -479,6 +519,9 @@ pub fn replace(
         "replace",
         format!("replaced {} occurrence(s) of {} with {} at lines {shown}", hits.len(), quote(old), quote(new)),
     );
+    if skipped > 0 {
+        change.notes.push(format!("{skipped} occurrence(s) inside an except phrase were left as is"));
+    }
     let tu_hits = hits.iter().filter(|(a, _)| unit_note(*a).is_some()).count();
     if tu_hits > 0 {
         change.notes.push(format!(
@@ -487,150 +530,6 @@ pub fn replace(
     }
     let edits = hits.into_iter().map(|(a, b)| (a, b, repl.clone())).collect();
     Ok(ReplaceOutcome::Edited(replace_ranges(data, edits)?, change))
-}
-
-fn row_in_rowspan(table: &Table, row: usize) -> bool {
-    table.cells.iter().any(|c| c.rowspan > 1 && c.row <= row && row < c.row + c.rowspan)
-}
-
-/// Whitespace that separates this TR from the previous sibling element.
-fn row_sep(doc: &Doc, tr: NodeId) -> Vec<u8> {
-    let tree = &doc.tree;
-    let parent = tree.node(tr).parent.expect("a table row has a parent");
-    let siblings = tree.children(parent);
-    let i = siblings.iter().position(|&s| s == tr).expect("row is its parent's child");
-    let prev_end = if i > 0 { tree.node(siblings[i - 1]).end } else { tree.node(parent).open_end };
-    let gap = &doc.data[prev_end..tree.node(tr).start];
-    if is_blank(gap) { gap.to_vec() } else { doc.newline().to_vec() }
-}
-
-fn locked(doc: &Doc, tr: NodeId, attr: &str) -> bool {
-    doc.attr(tr, attr).is_some_and(|v| v.eq_ignore_ascii_case("N"))
-}
-
-pub fn copy_row(
-    data: &[u8],
-    table_no: usize,
-    row: usize,
-    count: usize,
-    clear: bool,
-    force: bool,
-) -> Result<(Vec<u8>, Change)> {
-    if count < 1 {
-        return Err(Error::invalid("--count must be at least 1"));
-    }
-    let doc = Doc::parse(data.to_vec())?;
-    let table = doc.table(table_no)?;
-    require_verified(&doc, table.node, &format!("T{table_no}"))?;
-    if row == 0 || row > table.rows.len() {
-        return Err(Error::invalid(format!("T{table_no} has rows 1..{}", table.rows.len())));
-    }
-    let tr = table.rows[row - 1];
-    if locked(&doc, tr, "ACOPY") && !force {
-        return Err(Error::refused(format!(
-            "T{table_no}R{row} is marked ACOPY=\"N\" (row copying locked by the form)"
-        ))
-        .with_hint("pass --force-locked only when the user wants to depart from the form"));
-    }
-    if row_in_rowspan(table, row) {
-        return Err(Error::refused(format!("T{table_no}R{row} participates in a ROWSPAN"))
-            .with_hint("copy rows in DART Editor or edit the XML by hand"));
-    }
-    let trn = doc.tree.node(tr);
-    let mut row_bytes = data[trn.start..trn.end].to_vec();
-    let mut note = String::new();
-    if clear {
-        let sub = Doc::parse(row_bytes.clone())?;
-        let mut clears: Vec<Splice> = Vec::new();
-        let mut kept = Vec::new();
-        let mut col = 0;
-        for &cnode in sub.tree.children(sub.root()) {
-            if !is_cell(sub.tag(cnode)) {
-                continue;
-            }
-            col += 1;
-            let cn = sub.tree.node(cnode);
-            let has_unit = cn.tag == "TU" && cn.attr("AUNITVALUE").is_some_and(|v| !v.is_empty());
-            match leaf_for_text(&sub, cnode) {
-                None => {
-                    // Mixed content: empty every text run but keep the element structure.
-                    let mut runs = Vec::new();
-                    text_runs(&sub, cnode, &mut runs);
-                    clears.extend(
-                        runs.into_iter().filter(|&(a, b)| !is_blank(&row_bytes[a..b])).map(|(a, b)| (a, b, Vec::new())),
-                    );
-                    kept.push(format!("cell {col} (structure kept, text emptied)"));
-                }
-                Some(leaf) => {
-                    let l = sub.tree.node(leaf);
-                    if l.close_start != l.open_end {
-                        clears.push((l.open_end, l.close_start, Vec::new()));
-                    }
-                }
-            }
-            if has_unit {
-                clears.push(set_attr(&row_bytes, &sub, cnode, "AUNITVALUE", ""));
-            }
-        }
-        row_bytes = replace_ranges(&row_bytes, clears)?;
-        note = if kept.is_empty() { " (cleared)".into() } else { format!(" (cleared; {})", kept.join(", ")) };
-    }
-    let sep = row_sep(&doc, tr);
-    let mut insertion = Vec::new();
-    for _ in 0..count {
-        insertion.extend_from_slice(&sep);
-        insertion.extend_from_slice(&row_bytes);
-    }
-    let out = [&data[..trn.end], &insertion[..], &data[trn.end..]].concat();
-    let summary = format!("T{table_no}: copied R{row} {count} time(s) as R{}..R{}{note}", row + 1, row + count);
-    Ok((out, Change::new("copy-row", summary)))
-}
-
-pub fn delete_row(data: &[u8], table_no: usize, row: usize, force: bool) -> Result<(Vec<u8>, Change)> {
-    let doc = Doc::parse(data.to_vec())?;
-    let table = doc.table(table_no)?;
-    require_verified(&doc, table.node, &format!("T{table_no}"))?;
-    if row == 0 || row > table.rows.len() {
-        return Err(Error::invalid(format!("T{table_no} has rows 1..{}", table.rows.len())));
-    }
-    let tr = table.rows[row - 1];
-    if locked(&doc, tr, "ADELETE") && !force {
-        return Err(Error::refused(format!(
-            "T{table_no}R{row} is marked ADELETE=\"N\" (row deletion locked by the form)"
-        ))
-        .with_hint("pass --force-locked only when the user wants to depart from the form"));
-    }
-    if row_in_rowspan(table, row) {
-        return Err(Error::refused(format!("T{table_no}R{row} participates in a ROWSPAN"))
-            .with_hint("delete it in DART Editor or edit the XML by hand"));
-    }
-    let tree = &doc.tree;
-    let parent = tree.node(tr).parent.expect("a table row has a parent");
-    if tree.children(parent).iter().filter(|&&c| tree.tag(c) == "TR").count() == 1 {
-        return Err(Error::refused(format!(
-            "T{table_no}R{row} is the only row in its {}; refusing to leave it empty",
-            tree.tag(parent)
-        )));
-    }
-    let sep = row_sep(&doc, tr);
-    let trn = tree.node(tr);
-    let start = if trn.start >= sep.len() && data[trn.start - sep.len()..trn.start] == sep[..] {
-        trn.start - sep.len()
-    } else {
-        trn.start
-    };
-    let text = table
-        .cells
-        .iter()
-        .filter(|c| c.row == row)
-        .map(|c| node_text(tree, c.node, false))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let out = [&data[..start], &data[trn.end..]].concat();
-    Ok((
-        out,
-        Change::new("delete-row", format!("T{table_no}: deleted R{row} ({})", quote(&crate::text::prefix(&text, 80)))),
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +541,7 @@ enum FieldType {
     Str,
     Bool,
     Expect,
+    StrList,
 }
 
 struct Field {
@@ -659,7 +559,7 @@ pub struct OpSpec {
     fields: &'static [Field],
 }
 
-pub const OPS: [OpSpec; 4] = [
+pub const OPS: [OpSpec; 10] = [
     OpSpec {
         op: "set-cell",
         fields: &[
@@ -678,6 +578,7 @@ pub const OPS: [OpSpec; 4] = [
             field("new", FieldType::Str, true),
             field("expect", FieldType::Expect, false),
             field("table", FieldType::Int, false),
+            field("except", FieldType::StrList, false),
         ],
     },
     OpSpec {
@@ -698,6 +599,47 @@ pub const OPS: [OpSpec; 4] = [
             field("force_locked", FieldType::Bool, false),
         ],
     },
+    OpSpec {
+        op: "copy-col",
+        fields: &[
+            field("table", FieldType::Int, true),
+            field("col", FieldType::Int, true),
+            field("count", FieldType::Int, false),
+            field("clear", FieldType::Bool, false),
+            field("force_locked", FieldType::Bool, false),
+        ],
+    },
+    OpSpec {
+        op: "delete-col",
+        fields: &[
+            field("table", FieldType::Int, true),
+            field("col", FieldType::Int, true),
+            field("force_locked", FieldType::Bool, false),
+        ],
+    },
+    OpSpec {
+        op: "copy-table",
+        fields: &[
+            field("table", FieldType::Int, true),
+            field("count", FieldType::Int, false),
+            field("clear", FieldType::Bool, false),
+            field("force_locked", FieldType::Bool, false),
+        ],
+    },
+    OpSpec {
+        op: "delete-table",
+        fields: &[field("table", FieldType::Int, true), field("force_locked", FieldType::Bool, false)],
+    },
+    OpSpec {
+        op: "insert-paragraph",
+        fields: &[
+            field("text", FieldType::Str, true),
+            field("after_table", FieldType::Int, false),
+            field("before_table", FieldType::Int, false),
+            field("after_line", FieldType::Int, false),
+        ],
+    },
+    OpSpec { op: "delete-paragraph", fields: &[field("line", FieldType::Int, true)] },
 ];
 
 /// `name: type` listing of each operation's fields; `?` marks optional ones.
@@ -713,6 +655,7 @@ pub fn op_reference() -> Vec<String> {
                         FieldType::Str => "str",
                         FieldType::Bool => "bool",
                         FieldType::Expect => "int|\"any\"",
+                        FieldType::StrList => "[str]",
                     };
                     format!("{}{}: {kind}", f.name, if f.required { "" } else { "?" })
                 })
@@ -778,17 +721,33 @@ fn validate(op: &Value) -> Result<(&'static OpSpec, &serde_json::Map<String, Val
             FieldType::Str => value.is_string(),
             FieldType::Bool => value.is_boolean(),
             FieldType::Expect => true,
+            FieldType::StrList => value.as_array().is_some_and(|a| a.iter().all(Value::is_string)),
         };
         if !ok {
             let want = match f.kind {
                 FieldType::Int => "an integer",
                 FieldType::Str => "a string",
+                FieldType::StrList => "an array of strings",
                 _ => "true or false",
             };
             return Err(Error::invalid(format!("field {:?} must be {want}, got {value}", f.name)));
         }
     }
     Ok((spec, obj))
+}
+
+/// Exactly one of the three anchors `insert-paragraph` accepts.
+pub fn paragraph_anchor(
+    after_table: Option<usize>,
+    before_table: Option<usize>,
+    after_line: Option<usize>,
+) -> Result<structure::Anchor> {
+    match (after_table, before_table, after_line) {
+        (Some(t), None, None) => Ok(structure::Anchor::AfterTable(t)),
+        (None, Some(t), None) => Ok(structure::Anchor::BeforeTable(t)),
+        (None, None, Some(l)) => Ok(structure::Anchor::AfterLine(l)),
+        _ => Err(Error::invalid("give exactly one of after_table, before_table, after_line")),
+    }
 }
 
 /// Run a JSON array of edits in order against `contents.xml`.
@@ -814,19 +773,25 @@ pub fn apply(data: &[u8], ops: &[Value]) -> Result<(Vec<u8>, Vec<Change>)> {
                 ),
                 "replace" => {
                     let expect = parse_expect(op.get("expect").unwrap_or(&Value::from(1)))?;
-                    match replace(
-                        &data,
-                        text("old").unwrap_or(""),
-                        text("new").unwrap_or(""),
+                    let except: Vec<String> = op
+                        .get("except")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+                        .unwrap_or_default();
+                    let spec = ReplaceSpec {
+                        old: text("old").unwrap_or(""),
+                        new: text("new").unwrap_or(""),
                         expect,
-                        as_index(op, "table")?,
-                        false,
-                    )? {
+                        table: as_index(op, "table")?,
+                        except: &except,
+                        dry_run: false,
+                    };
+                    match replace(&data, &spec)? {
                         ReplaceOutcome::Edited(out, change) => Ok((out, change)),
                         ReplaceOutcome::Preview(_) => unreachable!("not a dry run"),
                     }
                 }
-                "copy-row" => copy_row(
+                "copy-row" => structure::copy_row(
                     &data,
                     req("table")?,
                     req("row")?,
@@ -834,7 +799,33 @@ pub fn apply(data: &[u8], ops: &[Value]) -> Result<(Vec<u8>, Vec<Change>)> {
                     flag("clear"),
                     flag("force_locked"),
                 ),
-                _ => delete_row(&data, req("table")?, req("row")?, flag("force_locked")),
+                "delete-row" => structure::delete_row(&data, req("table")?, req("row")?, flag("force_locked")),
+                "copy-col" => structure::copy_col(
+                    &data,
+                    req("table")?,
+                    req("col")?,
+                    as_index(op, "count")?.unwrap_or(1),
+                    flag("clear"),
+                    flag("force_locked"),
+                ),
+                "delete-col" => structure::delete_col(&data, req("table")?, req("col")?, flag("force_locked")),
+                "copy-table" => structure::copy_table(
+                    &data,
+                    req("table")?,
+                    as_index(op, "count")?.unwrap_or(1),
+                    flag("clear"),
+                    flag("force_locked"),
+                ),
+                "delete-table" => structure::delete_table(&data, req("table")?, flag("force_locked")),
+                "insert-paragraph" => {
+                    let anchor = paragraph_anchor(
+                        as_index(op, "after_table")?,
+                        as_index(op, "before_table")?,
+                        as_index(op, "after_line")?,
+                    )?;
+                    structure::insert_paragraph(&data, text("text").unwrap_or(""), anchor)
+                }
+                _ => structure::delete_paragraph(&data, req("line")?),
             }
         };
         let (next, change) = step().map_err(|e| e.context(&format!("edit #{} ({kind})", i + 1)))?;

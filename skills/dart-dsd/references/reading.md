@@ -48,8 +48,24 @@ meaning, and tell the user which parts were unverified.
 
 ## Compare two documents
 
-`dsd diff ORIGINAL EDITED` pairs table rows before cells, so an inserted or
-deleted row is reported whole at its coordinates. It lists changed cells and
-text blocks (including attribute changes such as `AUNITVALUE`), then the
-changed raw `contents.xml` line ranges and any other changed member. Add
-`--raw` for the changed lines themselves.
+- `dsd diff ORIGINAL EDITED` is for one file and its edit: blocks pair by
+  position, rows before cells, so an inserted or deleted row is reported whole
+  at its coordinates. It lists changed cells and text blocks (including
+  attribute changes such as `AUNITVALUE`), then the changed raw `contents.xml`
+  line ranges and any other changed member; `--raw` adds the lines.
+- `dsd compare BASE OTHER` is for two versions that may differ in form or
+  structure: a draft against the filed report, this quarter against the last.
+  Tables and paragraphs pair by content (a reordered table is paired and
+  marked `moved`; a table inside a cell is compared as a table of its own),
+  rows by their label (footnote markers and 주식회사/㈜ spellings ignored,
+  moved rows detected), and columns by header when the counts differ. Each item is `same`, `changed`, `onlyBase`,
+  or `onlyOther` under the base document's section (note) heading; cell
+  changes are `value` (with `delta` = OTHER − BASE), `text`, or `format` (the
+  same number or label written differently). JSON lists only differences
+  unless `--all`.
+- For a person, write the side-by-side report:
+  `dsd compare BASE OTHER --format html -o compare.html`. It renders both
+  documents as DART tables and paragraphs, highlights changed cells and
+  words, and has a section index, next/previous navigation, and a
+  changes-only filter. It is one local file; keep it with the documents and
+  do not upload it. Summarize what matters from `--format text`.

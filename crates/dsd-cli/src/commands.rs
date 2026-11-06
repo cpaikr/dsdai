@@ -10,11 +10,12 @@ use sha2::{Digest, Sha256};
 use dsd::archive::{CONTENTS, atomic_write, guard_output, same_file};
 use dsd::check::{Level, check_archive, compare_archives, compare_members, has_errors};
 use dsd::diff::{ChangeKind, block_diff, changed_line_count, raw_line_changes, split_lines};
-use dsd::edit::{self, Change, ReplaceOutcome, WriteReport};
+use dsd::edit::{self, Change, ReplaceOutcome, ReplaceSpec, WriteReport};
+use dsd::structure;
 use dsd::text::{Block, quote};
 use dsd::{Archive, Error, ErrorCode, Issue, document, read_archive, views};
 
-use crate::cli::{Command, Format};
+use crate::cli::{Command, CompareFormat, Format};
 use crate::envelope::{Failure, Warning};
 use crate::{release_check, upgrade};
 
@@ -58,6 +59,9 @@ pub fn run(command: Command) -> Outcome {
         Command::Check { file, against, schema_dir, no_schema } => {
             check(&file, against.as_deref(), schema_dir.as_deref(), no_schema)
         }
+        Command::Compare { base, other, format, output, force, all, limit } => {
+            compare(&base, &other, format, output.as_deref(), force, all, limit)
+        }
         Command::Diff { original, edited, limit, raw, format } => diff(&original, &edited, limit, raw, format.format),
         Command::SetCell { file, write, target, col, text, unit_value, flatten } => {
             let src = read_archive(&file)?;
@@ -65,10 +69,11 @@ pub fn run(command: Command) -> Outcome {
                 edit::set_cell(src.contents()?, target.table, target.row, col, &text, unit_value.as_deref(), flatten)?;
             finish(&src, data, &[change], &write.output, write.force)
         }
-        Command::Replace { file, output, force, dry_run, old, new, expect, table } => {
+        Command::Replace { file, output, force, dry_run, old, new, expect, table, except } => {
             let src = read_archive(&file)?;
             let expect = edit::parse_expect(&Value::String(expect))?;
-            match edit::replace(src.contents()?, &old, &new, expect, table, dry_run)? {
+            let spec = ReplaceSpec { old: &old, new: &new, expect, table, except: &except, dry_run };
+            match edit::replace(src.contents()?, &spec)? {
                 ReplaceOutcome::Preview(preview) => json_ok(preview),
                 ReplaceOutcome::Edited(data, change) => {
                     let out = output.expect("clap requires --output without --dry-run");
@@ -79,12 +84,44 @@ pub fn run(command: Command) -> Outcome {
         Command::CopyRow { file, write, target, count, clear, force_locked } => {
             let src = read_archive(&file)?;
             let (data, change) =
-                edit::copy_row(src.contents()?, target.table, target.row, count as usize, clear, force_locked)?;
+                structure::copy_row(src.contents()?, target.table, target.row, count as usize, clear, force_locked)?;
             finish(&src, data, &[change], &write.output, write.force)
         }
         Command::DeleteRow { file, write, target, force_locked } => {
             let src = read_archive(&file)?;
-            let (data, change) = edit::delete_row(src.contents()?, target.table, target.row, force_locked)?;
+            let (data, change) = structure::delete_row(src.contents()?, target.table, target.row, force_locked)?;
+            finish(&src, data, &[change], &write.output, write.force)
+        }
+        Command::CopyCol { file, write, target, count, clear, force_locked } => {
+            let src = read_archive(&file)?;
+            let (data, change) =
+                structure::copy_col(src.contents()?, target.table, target.col, count as usize, clear, force_locked)?;
+            finish(&src, data, &[change], &write.output, write.force)
+        }
+        Command::DeleteCol { file, write, target, force_locked } => {
+            let src = read_archive(&file)?;
+            let (data, change) = structure::delete_col(src.contents()?, target.table, target.col, force_locked)?;
+            finish(&src, data, &[change], &write.output, write.force)
+        }
+        Command::CopyTable { file, write, table, count, clear, force_locked } => {
+            let src = read_archive(&file)?;
+            let (data, change) = structure::copy_table(src.contents()?, table, count as usize, clear, force_locked)?;
+            finish(&src, data, &[change], &write.output, write.force)
+        }
+        Command::DeleteTable { file, write, table, force_locked } => {
+            let src = read_archive(&file)?;
+            let (data, change) = structure::delete_table(src.contents()?, table, force_locked)?;
+            finish(&src, data, &[change], &write.output, write.force)
+        }
+        Command::InsertParagraph { file, write, text, after_table, before_table, after_line } => {
+            let src = read_archive(&file)?;
+            let anchor = edit::paragraph_anchor(after_table, before_table, after_line)?;
+            let (data, change) = structure::insert_paragraph(src.contents()?, &text, anchor)?;
+            finish(&src, data, &[change], &write.output, write.force)
+        }
+        Command::DeleteParagraph { file, write, line } => {
+            let src = read_archive(&file)?;
+            let (data, change) = structure::delete_paragraph(src.contents()?, line)?;
             finish(&src, data, &[change], &write.output, write.force)
         }
         Command::Apply { file, edits, write } => {
@@ -240,6 +277,68 @@ fn check(file: &Path, against: Option<&Path>, schema_dir: Option<&Path>, no_sche
         return Err(Failure::new(ErrorCode::CheckFailed, message).with_result(result));
     }
     json_ok(result)
+}
+
+fn compare(
+    base: &Path,
+    other: &Path,
+    format: CompareFormat,
+    output: Option<&Path>,
+    force: bool,
+    all: bool,
+    limit: usize,
+) -> Outcome {
+    let (ba, oa) = (read_archive(base)?, read_archive(other)?);
+    let (bd, od) = (document(&ba)?, document(&oa)?);
+    let cmp = dsd::compare::compare(&ba.file_name(), &bd, &oa.file_name(), &od);
+    let output = output.filter(|p| p.as_os_str() != "-");
+    if format == CompareFormat::Html && output.is_none() {
+        return Err(Error::invalid("--format html writes a file; pass -o PATH")
+            .with_hint("for example: dsd compare a.dsd b.dsd --format html -o compare.html")
+            .into());
+    }
+    let listed: Vec<&dsd::compare::Item> =
+        cmp.items.iter().filter(|i| all || i.status != dsd::compare::Status::Same).collect();
+    let limited = listed.len() > limit;
+    let shown = &listed[..listed.len().min(limit)];
+    let rendered = match format {
+        CompareFormat::Html => dsd::compare::render_html(&cmp, &bd, &od),
+        CompareFormat::Text => dsd::compare::render_text(&cmp, shown),
+        CompareFormat::Json => {
+            let result = json!({
+                "base": cmp.base,
+                "other": cmp.other,
+                "summary": cmp.summary,
+                "limited": limited,
+                "items": shown,
+            });
+            if output.is_none() {
+                return json_ok(result);
+            }
+            let mut s = serde_json::to_string(&result).expect("comparisons serialize");
+            s.push('\n');
+            s
+        }
+    };
+    let mut rendered = rendered;
+    if limited && format == CompareFormat::Text {
+        let _ = writeln!(rendered, "... {} more item(s) (raise --limit)", listed.len() - limit);
+    }
+    let Some(out) = output else {
+        return Ok(Output::Text(rendered));
+    };
+    guard_output(out, force, &[base, other])?;
+    if same_file(out, base) || same_file(out, other) {
+        return Err(Failure::new(ErrorCode::OutputExists, "refusing to write the comparison over a compared .dsd"));
+    }
+    atomic_write(out, rendered.as_bytes())?;
+    json_ok(json!({
+        "output": out.display().to_string(),
+        "bytes": rendered.len(),
+        "format": match format { CompareFormat::Html => "html", CompareFormat::Text => "text", CompareFormat::Json => "json" },
+        "summary": cmp.summary,
+        "limited": limited && format != CompareFormat::Html,
+    }))
 }
 
 fn block_json(b: &Block) -> Value {

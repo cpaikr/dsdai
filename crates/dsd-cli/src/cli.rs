@@ -16,6 +16,7 @@ Typical flow:
   4. dsd table report.dsd 3 --format text    cells with R#/C# coordinates
   5. dsd set-cell report.dsd -o out.dsd --table 3 --row 4 --col 2 --text 1,100
   6. dsd check out.dsd --against report.dsd && dsd diff report.dsd out.dsd
+  7. dsd compare filed.dsd draft.dsd --format html -o compare.html
 
 Output:
   Commands print one JSON object to stdout: {ok, command, result, warnings,
@@ -55,6 +56,13 @@ pub enum Format {
     Text,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompareFormat {
+    Json,
+    Text,
+    Html,
+}
+
 #[derive(Debug, Args)]
 pub struct FormatArg {
     /// Output format: one JSON envelope, or a compact text listing.
@@ -81,6 +89,37 @@ pub struct CellTarget {
     #[arg(long, value_name = "N")]
     pub row: usize,
 }
+
+#[derive(Debug, Args)]
+pub struct ColTarget {
+    /// Table number (T#).
+    #[arg(long, value_name = "N")]
+    pub table: usize,
+    /// Grid column number (C#).
+    #[arg(long, value_name = "N")]
+    pub col: usize,
+}
+
+const COMPARE_AFTER: &str = "\
+Pairs tables and paragraphs by content, not position, so documents built on
+different forms, or with tables inserted, removed, or reordered, still line up.
+Within a table pair, rows are matched by their label (footnote markers like (*1)
+and 주식회사/(주)/㈜ spellings are ignored) and columns by their headers when the
+column counts differ. Numbers compare as numbers: kind \"value\" carries
+delta = OTHER - BASE; \"format\" is the same number written differently.
+
+JSON and text list only items that differ unless --all; html renders both
+documents side by side with changed cells and words highlighted, a section
+index, next/previous navigation (n/p), and a changes-only filter. The report is
+one self-contained file with no external resources; it needs -o.";
+
+const STRUCTURE_AFTER: &str = "\
+Copies join every span they lie inside: copying a row that sits under a
+ROWSPAN grows that cell (ROWSPAN and HEIGHT) instead of duplicating it, and
+copying a column crossed by a COLSPAN widens that cell. Deleting shrinks spans;
+a cell that spans down from a deleted row moves to the next row. Sizes follow
+DART Editor's arithmetic: cell HEIGHT = spanned TR HEIGHT - 7, cell and table
+WIDTH from the COL widths in the table's own convention.";
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -164,6 +203,29 @@ C:\\DART\\Resource\\Dtd when present; without one it reports schema-skipped.")]
         #[arg(long)]
         no_schema: bool,
     },
+    /// Align two documents by content and report table, row, cell, and wording differences.
+    #[command(after_help = COMPARE_AFTER)]
+    Compare {
+        /// The reference document (left side; deltas are OTHER - BASE).
+        base: PathBuf,
+        /// The document to compare with it (right side).
+        other: PathBuf,
+        /// Output: one JSON envelope, a compact text listing, or an HTML report (needs -o).
+        #[arg(long, value_enum, default_value_t = CompareFormat::Json)]
+        format: CompareFormat,
+        /// Write the comparison to this file; stdout then carries a summary envelope.
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Replace an existing --output file.
+        #[arg(long)]
+        force: bool,
+        /// Also list items that are the same (JSON and text).
+        #[arg(long)]
+        all: bool,
+        /// List at most this many items (JSON and text).
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+    },
     /// Changed cells and text blocks between two .dsd files, then raw line and member changes.
     Diff {
         original: PathBuf,
@@ -229,15 +291,19 @@ find's whitespace-insensitive one, is what --expect must equal.")]
         /// Limit to table N.
         #[arg(long, value_name = "N")]
         table: Option<usize>,
+        /// Leave occurrences inside this phrase alone (repeatable): --old 반기 --except 분ㆍ반기.
+        #[arg(long, allow_hyphen_values = true, value_name = "PHRASE")]
+        except: Vec<String>,
     },
-    /// Duplicate a table row below itself.
+    /// Duplicate a table row below itself; copies join the ROWSPANs the row lies in.
+    #[command(after_help = STRUCTURE_AFTER)]
     CopyRow {
         file: PathBuf,
         #[command(flatten)]
         write: WriteArgs,
         #[command(flatten)]
         target: CellTarget,
-        /// Number of copies.
+        /// Number of copies (1-1000).
         #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
         count: u32,
         /// Empty the copied cells' text (and TU AUNITVALUE).
@@ -247,7 +313,8 @@ find's whitespace-insensitive one, is what --expect must equal.")]
         #[arg(long)]
         force_locked: bool,
     },
-    /// Delete a table row.
+    /// Delete a table row; spans crossing it shrink.
+    #[command(after_help = STRUCTURE_AFTER)]
     DeleteRow {
         file: PathBuf,
         #[command(flatten)]
@@ -258,11 +325,103 @@ find's whitespace-insensitive one, is what --expect must equal.")]
         #[arg(long)]
         force_locked: bool,
     },
+    /// Duplicate a grid column to the right of itself; COL widths and spans follow.
+    #[command(after_help = STRUCTURE_AFTER)]
+    CopyCol {
+        file: PathBuf,
+        #[command(flatten)]
+        write: WriteArgs,
+        #[command(flatten)]
+        target: ColTarget,
+        /// Number of copies (1-1000).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        count: u32,
+        /// Empty the copied cells' text (and TU AUNITVALUE).
+        #[arg(long)]
+        clear: bool,
+        /// Ignore ACOPYCOL="N" (form-locked columns).
+        #[arg(long)]
+        force_locked: bool,
+    },
+    /// Delete a grid column; COL widths and spans follow.
+    #[command(after_help = STRUCTURE_AFTER)]
+    DeleteCol {
+        file: PathBuf,
+        #[command(flatten)]
+        write: WriteArgs,
+        #[command(flatten)]
+        target: ColTarget,
+        /// Ignore ADELETECOL="N" (form-locked columns).
+        #[arg(long)]
+        force_locked: bool,
+    },
+    /// Duplicate a table right after itself; later tables are renumbered.
+    CopyTable {
+        file: PathBuf,
+        #[command(flatten)]
+        write: WriteArgs,
+        /// Table number (T#).
+        #[arg(long, value_name = "N")]
+        table: usize,
+        /// Number of copies (1-1000).
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        count: u32,
+        /// Empty every cell of the copies (and TU AUNITVALUE).
+        #[arg(long)]
+        clear: bool,
+        /// Allow a table inside a form-managed TABLE-GROUP (cover and period blocks).
+        #[arg(long)]
+        force_locked: bool,
+    },
+    /// Remove a table; later tables are renumbered.
+    DeleteTable {
+        file: PathBuf,
+        #[command(flatten)]
+        write: WriteArgs,
+        /// Table number (T#).
+        #[arg(long, value_name = "N")]
+        table: usize,
+        /// Allow a table inside a form-managed TABLE-GROUP (cover and period blocks).
+        #[arg(long)]
+        force_locked: bool,
+    },
+    /// Insert a plain paragraph after or before a table, or after a paragraph.
+    #[command(after_help = "\
+Give exactly one anchor. --after-line takes the contents.xml line of a free
+paragraph (one not inside a table cell) from `dsd read`. The paragraph is
+written as <P>text</P>; newlines in --text become DART line breaks.")]
+    #[command(group(clap::ArgGroup::new("anchor").required(true).args(["after_table", "before_table", "after_line"])))]
+    InsertParagraph {
+        file: PathBuf,
+        #[command(flatten)]
+        write: WriteArgs,
+        /// Paragraph text; may start with '-'.
+        #[arg(long, allow_hyphen_values = true)]
+        text: String,
+        /// Insert after table N.
+        #[arg(long, value_name = "N")]
+        after_table: Option<usize>,
+        /// Insert before table N.
+        #[arg(long, value_name = "N")]
+        before_table: Option<usize>,
+        /// Insert after the paragraph that starts on this line.
+        #[arg(long, value_name = "LINE")]
+        after_line: Option<usize>,
+    },
+    /// Remove the free paragraph that starts on a contents.xml line.
+    DeleteParagraph {
+        file: PathBuf,
+        #[command(flatten)]
+        write: WriteArgs,
+        /// Line of the paragraph, from `dsd read`.
+        #[arg(long, value_name = "LINE")]
+        line: usize,
+    },
     /// Apply a JSON array of edits in order and write one new .dsd.
     #[command(after_help = crate::help::APPLY_AFTER)]
     Apply {
         file: PathBuf,
-        /// JSON file: [{"op": "set-cell"|"replace"|"copy-row"|"delete-row", ...}].
+        /// JSON file: [{"op": "set-cell"|"replace"|"copy-row"|..., ...}]; see below.
         edits: PathBuf,
         #[command(flatten)]
         write: WriteArgs,
@@ -312,11 +471,18 @@ impl Command {
             Self::Table { .. } => "table",
             Self::Find { .. } => "find",
             Self::Check { .. } => "check",
+            Self::Compare { .. } => "compare",
             Self::Diff { .. } => "diff",
             Self::SetCell { .. } => "set-cell",
             Self::Replace { .. } => "replace",
             Self::CopyRow { .. } => "copy-row",
             Self::DeleteRow { .. } => "delete-row",
+            Self::CopyCol { .. } => "copy-col",
+            Self::DeleteCol { .. } => "delete-col",
+            Self::CopyTable { .. } => "copy-table",
+            Self::DeleteTable { .. } => "delete-table",
+            Self::InsertParagraph { .. } => "insert-paragraph",
+            Self::DeleteParagraph { .. } => "delete-paragraph",
             Self::Apply { .. } => "apply",
             Self::Extract { .. } => "extract",
             Self::Pack { .. } => "pack",

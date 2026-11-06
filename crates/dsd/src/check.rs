@@ -271,6 +271,47 @@ fn int_attr_strict(doc: &Doc, node: usize, name: &str) -> Option<i64> {
     doc.attr(node, name).and_then(attr_int)
 }
 
+/// How a table relates cell WIDTH to the spanned COL widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidthConvention {
+    /// Dart4-era: cell WIDTH = sum(spanned COL) - 9.
+    Modern,
+    /// One Dart3-era editor: cell WIDTH = sum(spanned COL) + 9 x COLSPAN.
+    Legacy,
+}
+
+impl WidthConvention {
+    /// Cell WIDTH change when a cell gains (or loses) a column of width `col`.
+    pub const fn per_column(self, col: i64) -> i64 {
+        match self {
+            Self::Modern => col,
+            Self::Legacy => col + 9,
+        }
+    }
+}
+
+/// The cell WIDTH each convention expects for `cell`: (modern, legacy).
+/// Saturating, so hostile COL widths cannot overflow.
+fn expected_widths(table: &Table, cell: &Cell) -> (i64, i64) {
+    let end = (cell.col - 1 + cell.colspan).min(table.cols.len());
+    let span = table.cols[(cell.col - 1).min(end)..end].iter().fold(0i64, |a, &w| a.saturating_add(w));
+    let colspan = i64::try_from(cell.colspan).unwrap_or(i64::MAX);
+    (span.saturating_sub(9), span.saturating_add(colspan.saturating_mul(9)))
+}
+
+/// The convention most of the table's cells follow; Modern on a tie. Both
+/// `check` and the structural edits decide by this one vote.
+pub fn width_convention(doc: &Doc, table: &Table) -> WidthConvention {
+    let (mut modern, mut legacy) = (0usize, 0usize);
+    for cell in &table.cells {
+        let Some(width) = int_attr_strict(doc, cell.node, "WIDTH") else { continue };
+        let (m, l) = expected_widths(table, cell);
+        modern += usize::from(width == m);
+        legacy += usize::from(width == l);
+    }
+    if legacy > modern { WidthConvention::Legacy } else { WidthConvention::Modern }
+}
+
 /// Compare cell WIDTH/HEIGHT with the table's own sizing convention.
 ///
 /// Observed: Dart4-era editors write cell WIDTH = sum(spanned COL) - 9; an
@@ -280,21 +321,15 @@ fn width_issues(doc: &Doc, table: &Table, place: &str) -> Vec<Issue> {
     if table.cols.iter().all(|&c| c == 0) || table.cells.is_empty() {
         return Vec::new();
     }
-    let (mut modern_hits, mut legacy_hits) = (0, 0);
-    let mut measured: Vec<(&Cell, i64, i64)> = Vec::new();
+    let modern = width_convention(doc, table) == WidthConvention::Modern;
+    let mut measured: Vec<(&Cell, bool)> = Vec::new();
     for cell in &table.cells {
         let Some(width) = int_attr_strict(doc, cell.node, "WIDTH") else { continue };
-        let end = (cell.col - 1 + cell.colspan).min(table.cols.len());
-        let span: i64 = table.cols[(cell.col - 1).min(end)..end].iter().sum();
-        let (modern, legacy) = (span - 9, span + 9 * i64::try_from(cell.colspan).unwrap_or(i64::MAX / 18));
-        measured.push((cell, width - modern, width - legacy));
-        modern_hits += usize::from(width == modern);
-        legacy_hits += usize::from(width == legacy);
+        let (m, l) = expected_widths(table, cell);
+        measured.push((cell, width != if modern { m } else { l }));
     }
-    let modern = modern_hits >= legacy_hits;
     let mut out = Vec::new();
-    let off: Vec<&Cell> =
-        measured.iter().filter(|(_, dm, dl)| if modern { *dm != 0 } else { *dl != 0 }).map(|(c, _, _)| *c).collect();
+    let off: Vec<&Cell> = measured.iter().filter(|(_, off)| *off).map(|(c, _)| *c).collect();
     if !off.is_empty() && off.len() < measured.len() {
         let sample = off.iter().take(5).map(|c| format!("R{}C{}", c.row, c.col)).collect::<Vec<_>>().join(", ");
         out.push(Issue::warning(
@@ -306,8 +341,13 @@ fn width_issues(doc: &Doc, table: &Table, place: &str) -> Vec<Issue> {
     for cell in &table.cells {
         let Some(h) = int_attr_strict(doc, cell.node, "HEIGHT") else { continue };
         let rows = &table.rows[cell.row - 1..(cell.row - 1 + cell.rowspan).min(table.rows.len())];
-        let Some(sum) = rows.iter().map(|&r| int_attr_strict(doc, r, "HEIGHT")).sum::<Option<i64>>() else { continue };
-        if h != sum - 7 {
+        let Some(row_heights) = rows.iter().map(|&r| int_attr_strict(doc, r, "HEIGHT")).collect::<Option<Vec<i64>>>()
+        else {
+            continue;
+        };
+        // Checked: hostile row heights read as a mismatch, never an overflow.
+        let expected = row_heights.iter().try_fold(0i64, |a, &v| a.checked_add(v)).and_then(|s| s.checked_sub(7));
+        if expected != Some(h) {
             heights.push(format!("R{}C{}", cell.row, cell.col));
         }
     }
