@@ -48,6 +48,18 @@
       "prompt": "sample.dsd 읽어줘. (dsd 명령이 없다고 나와요.)",
       "hard_because": "The executable is missing; installation must follow the published guide without inventing commands, then the original task must resume.",
       "expected_output": "Reads references/installation.md, installs dsd from the public GitHub Release with the guide's verified installer (or asks for release files when offline), verifies dsd --version by full path and by name, then completes the reading task. Does not treat later update advisories as an upgrade request."
+    },
+    {
+      "id": 9,
+      "prompt": "fixtures/public/sample.dsd와 동료가 고친 sample_v2.dsd를 비교해서 차이를 보기 쉽게 정리해줘.",
+      "hard_because": "A positional diff misaligns once tables are inserted or reordered; figures must be compared as numbers and the report must stay local.",
+      "expected_output": "Runs dsd compare BASE OTHER (JSON or --format text) to read the differences and writes the side-by-side report with --format html -o beside the sources. Summarizes changed values with their deltas, rows and columns only on one side, moved rows, and reworded paragraphs by section, names sample.dsd as the base, and does not upload either file or the report."
+    },
+    {
+      "id": 10,
+      "prompt": "sample.dsd 재무상태표에 제 3 기 비교 열을 하나 더 추가하고, 주주 표에 주주 한 명을 추가해줘.",
+      "hard_because": "Adding a column changes COL widths, the table WIDTH, and every row; the shareholder table has a header ROWSPAN/COLSPAN that must stay consistent.",
+      "expected_output": "Uses copy-col --clear on T3 and copy-row --clear on a T4 body row (or apply), then sets the new header and cells with set-cell; leaves the original untouched; runs check --against with no new cell-width or cell-height warnings and diff or compare showing exactly the added column and row; reports the empty figures for the user to fill."
     }
   ]
 }

@@ -271,6 +271,38 @@ fn int_attr_strict(doc: &Doc, node: usize, name: &str) -> Option<i64> {
     doc.attr(node, name).and_then(attr_int)
 }
 
+/// How a table relates cell WIDTH to the spanned COL widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WidthConvention {
+    /// Dart4-era: cell WIDTH = sum(spanned COL) - 9.
+    Modern,
+    /// One Dart3-era editor: cell WIDTH = sum(spanned COL) + 9 x COLSPAN.
+    Legacy,
+}
+
+impl WidthConvention {
+    /// Cell WIDTH change when a cell gains (or loses) a column of width `col`.
+    pub const fn per_column(self, col: i64) -> i64 {
+        match self {
+            Self::Modern => col,
+            Self::Legacy => col + 9,
+        }
+    }
+}
+
+/// The convention most of the table's cells follow; Modern on a tie.
+pub fn width_convention(doc: &Doc, table: &Table) -> WidthConvention {
+    let (mut modern, mut legacy) = (0usize, 0usize);
+    for cell in &table.cells {
+        let Some(width) = int_attr_strict(doc, cell.node, "WIDTH") else { continue };
+        let end = (cell.col - 1 + cell.colspan).min(table.cols.len());
+        let span: i64 = table.cols[(cell.col - 1).min(end)..end].iter().sum();
+        modern += usize::from(width == span - 9);
+        legacy += usize::from(width == span + 9 * i64::try_from(cell.colspan).unwrap_or(i64::MAX / 18));
+    }
+    if legacy > modern { WidthConvention::Legacy } else { WidthConvention::Modern }
+}
+
 /// Compare cell WIDTH/HEIGHT with the table's own sizing convention.
 ///
 /// Observed: Dart4-era editors write cell WIDTH = sum(spanned COL) - 9; an

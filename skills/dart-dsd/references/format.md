@@ -204,14 +204,15 @@ element exactly and the CLI already handles both with the same code.
 
 ## Manual edit recipes
 
-Use these with `extract` → edit `contents.xml` → `pack`.
+The structural commands (`copy-row`, `copy-col`, `copy-table`,
+`insert-paragraph`, and their deletions) cover rows and columns with spans,
+whole tables, and plain paragraphs; use these recipes with `extract` → edit
+`contents.xml` → `pack` only for what they do not:
 
-- **Add a paragraph:** copy a neighboring `<P …>…</P>` line, including its
-  `USERMARK`, and change the text using the escapes above.
-- **Add a row with spans:** copy the row pattern of an existing group and
-  adjust `ROWSPAN` on the cell that spans it; recompute that cell's `HEIGHT`.
-- **Add or remove a column:** change `COL` entries, every row's cells, any
-  `COLSPAN` crossing the column, and recompute `WIDTH` values with the size
-  arithmetic. Prefer DART Editor for this when available.
+- **A paragraph with attributes:** copy a neighboring `<P …>…</P>` line,
+  including its `USERMARK`, and change the text using the escapes above.
+- **Merge or split cells:** set `ROWSPAN`/`COLSPAN` on the remaining cell,
+  remove the covered cells, and recompute `HEIGHT`/`WIDTH` with the size
+  arithmetic.
 - **Add a titled section:** copy an existing `SECTION-n` shell with the same
   `ACLASS`, give its `TITLE` a new `ATOCID`, and update `BODY ATOCID`.

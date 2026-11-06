@@ -604,15 +604,312 @@ fn copy_then_delete_row_restores_bytes() {
 }
 
 #[test]
-fn row_locks_and_rowspans_are_respected() {
+fn row_locks_are_respected() {
     let w = Work::new("locks");
     let o = s(&w.path("o.dsd"));
     let run = dsd(["delete-row", &s(&w.src()), "--table", "3", "--row", "6", "-o", &o]);
     run.fails("edit_refused");
     assert!(run.error_text().contains("ADELETE=\"N\""));
-    let run = dsd(["copy-row", &s(&w.src()), "--table", "4", "--row", "1", "-o", &o]);
-    assert!(run.error_text().contains("ROWSPAN"));
     dsd(["delete-row", &s(&w.src()), "--table", "3", "--row", "6", "--force-locked", "-o", &o]).ok();
+}
+
+/// `check --against` passes and reports no new warning-level issue.
+fn checks_clean(out: &std::path::Path, original: &std::path::Path) {
+    let r = dsd(["check", &s(out), "--against", &s(original), "--no-schema"]).ok();
+    let warned: Vec<&Value> = r["issues"].as_array().unwrap().iter().filter(|i| i["level"] == "warning").collect();
+    assert!(warned.is_empty(), "{warned:?}");
+}
+
+#[test]
+fn copied_rows_join_the_spans_they_sit_in() {
+    let w = Work::new("rowspan-copy");
+    let (a, b) = (w.path("a.dsd"), w.path("b.dsd"));
+    // R2 sits under the header's 주주명 ROWSPAN: the copy extends it.
+    let r = dsd(["copy-row", &s(&w.src()), "--table", "4", "--row", "2", "-o", &s(&a)]).ok();
+    assert!(r["changes"][0]["notes"][0].as_str().unwrap().contains("R1C1 ROWSPAN 2 -> 3"));
+    let xml = contents_of(&a);
+    assert!(xml.contains("HEIGHT=\"83\" ROWSPAN=\"3\" VALIGN=\"MIDDLE\" WIDTH=\"191\">주주명</TH>"), "{xml}");
+    let t = &dsd(["table", &s(&a), "4"]).ok()["tables"][0];
+    assert_eq!((t["rowCount"].as_u64(), t["rows"][2]["cells"][0]["coveredBy"].as_str()), (Some(5), Some("R1C1")));
+    checks_clean(&a, &w.src());
+    dsd(["delete-row", &s(&a), "--table", "4", "--row", "3", "-o", &s(&b)]).ok();
+    assert_eq!(contents_of(&b), w.contents(), "deleting the copy shrinks the span back");
+
+    // Copying the row that anchors the span leaves the spanning cell out of the copy.
+    let c = w.path("c.dsd");
+    dsd(["copy-row", &s(&w.src()), "--table", "4", "--row", "1", "-o", &s(&c)]).ok();
+    let t = &dsd(["table", &s(&c), "4"]).ok()["tables"][0];
+    assert_eq!(t["rows"][1]["cells"][0]["coveredBy"], "R1C1");
+    assert_eq!(t["rows"][1]["cells"][1]["text"], "당기말");
+    checks_clean(&c, &w.src());
+}
+
+#[test]
+fn deleting_a_span_anchor_row_moves_the_cell_down() {
+    let w = Work::new("rowspan-delete");
+    let a = w.path("a.dsd");
+    let r = dsd(["delete-row", &s(&w.src()), "--table", "4", "--row", "1", "-o", &s(&a)]).ok();
+    assert!(r["changes"][0]["notes"][0].as_str().unwrap().contains("R1C1 moved to R2"));
+    let t = &dsd(["table", &s(&a), "4"]).ok()["tables"][0];
+    let first: Vec<&str> =
+        t["rows"][0]["cells"].as_array().unwrap().iter().map(|c| c["text"].as_str().unwrap()).collect();
+    assert_eq!(first, ["주주명", "주식수(주)", "지분율(%)"]);
+    assert!(t["rows"][0]["cells"][0].get("rowspan").is_none());
+    assert!(contents_of(&a).contains("HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">주주명</TH>"));
+    checks_clean(&a, &w.src());
+}
+
+#[test]
+fn columns_copy_and_delete_with_widths_and_spans() {
+    let w = Work::new("cols");
+    let (a, b) = (w.path("a.dsd"), w.path("b.dsd"));
+    dsd(["copy-col", &s(&w.src()), "--table", "3", "--col", "2", "--clear", "-o", &s(&a)]).ok();
+    let t = &dsd(["table", &s(&a), "3"]).ok()["tables"][0];
+    assert_eq!(t["colWidths"], json!([256, 185, 185, 185]));
+    assert_eq!(
+        (t["rows"][2]["cells"][1]["text"].as_str(), t["rows"][2]["cells"][2]["text"].as_str()),
+        (Some("1,500,000"), Some(""))
+    );
+    assert!(contents_of(&a).contains("<TABLE ACLASS=\"NORMAL\" AFIXTABLE=\"N\" BORDER=\"1\" WIDTH=\"811\">"));
+    checks_clean(&a, &w.src());
+    dsd(["delete-col", &s(&a), "--table", "3", "--col", "3", "-o", &s(&b)]).ok();
+    assert_eq!(contents_of(&b), w.contents());
+
+    // A COLSPAN crossing the column widens, keeping WIDTH = sum(COL) - 9.
+    let c = w.path("c.dsd");
+    let r = dsd(["copy-col", &s(&w.src()), "--table", "4", "--col", "2", "-o", &s(&c)]).ok();
+    assert!(r["changes"][0]["notes"][0].as_str().unwrap().contains("COLSPAN 2 -> 3"));
+    assert!(contents_of(&c).contains("COLSPAN=\"3\" HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"591\">당기말</TH>"));
+    checks_clean(&c, &w.src());
+    let d = w.path("d.dsd");
+    dsd(["delete-col", &s(&w.src()), "--table", "4", "--col", "3", "-o", &s(&d)]).ok();
+    assert!(contents_of(&d).contains("HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">당기말</TH>"));
+    checks_clean(&d, &w.src());
+
+    let locked = w.variant(
+        "locked.dsd",
+        &replace_once(
+            &w.contents(),
+            "ADELETECOL=\"Y\" AMOVECOL=\"N\" HEIGHT=\"23\" WIDTH=\"176\">제 5 기",
+            "ADELETECOL=\"N\" AMOVECOL=\"N\" HEIGHT=\"23\" WIDTH=\"176\">제 5 기",
+        ),
+    );
+    let run = dsd(["delete-col", &s(&locked), "--table", "3", "--col", "2", "-o", &s(&w.path("e.dsd"))]);
+    run.fails("edit_refused");
+    assert!(run.error_text().contains("ADELETECOL"));
+    dsd(["delete-col", &s(&locked), "--table", "3", "--col", "2", "--force-locked", "-o", &s(&w.path("e.dsd"))]).ok();
+    dsd(["delete-col", &s(&w.src()), "--table", "2", "--col", "9", "-o", &s(&w.path("f.dsd"))])
+        .fails("invalid_argument");
+}
+
+#[test]
+fn tables_and_paragraphs_copy_insert_and_delete() {
+    let w = Work::new("blocks");
+    let (a, b) = (w.path("a.dsd"), w.path("b.dsd"));
+    let r = dsd(["copy-table", &s(&w.src()), "--table", "3", "--clear", "-o", &s(&a)]).ok();
+    assert!(r["changes"][0]["summary"].as_str().unwrap().contains("as T4..T4"));
+    assert_eq!(dsd(["inspect", &s(&a)]).ok()["document"]["counts"]["TABLE"], 5);
+    assert_eq!(dsd(["table", &s(&a), "4"]).ok()["tables"][0]["rows"][2]["cells"][1]["text"], "");
+    dsd(["delete-table", &s(&a), "--table", "4", "-o", &s(&b)]).ok();
+    assert_eq!(contents_of(&b), w.contents());
+    let run = dsd(["copy-table", &s(&w.src()), "--table", "1", "-o", &s(&w.path("c.dsd"))]);
+    run.fails("edit_refused");
+    assert!(run.error_text().contains("TABLE-GROUP"));
+
+    let (c, d) = (w.path("p.dsd"), w.path("q.dsd"));
+    dsd(["insert-paragraph", &s(&w.src()), "--after-table", "3", "--text", "2. 새 주석\n둘째 줄", "-o", &s(&c)]).ok();
+    assert!(contents_of(&c).contains("</TABLE>\r\n\r\n<P>2. 새 주석&amp;cr;둘째 줄</P>\r\n\r\n<P>1. 일반사항</P>"));
+    let line = dsd(["find", &s(&c), "새 주석"]).ok()["matches"][0]["line"].as_u64().unwrap().to_string();
+    dsd(["delete-paragraph", &s(&c), "--line", &line, "-o", &s(&d)]).ok();
+    assert_eq!(contents_of(&d), w.contents());
+    let e = w.path("e.dsd");
+    dsd(["insert-paragraph", &s(&w.src()), "--before-table", "4", "--text", "앞", "-o", &s(&e)]).ok();
+    assert!(contents_of(&e).contains("<P>1. 일반사항</P>\r\n\r\n<P>앞</P>\r\n\r\n<TABLE"));
+    let run =
+        dsd(["insert-paragraph", &s(&w.src()), "--after-table", "3", "--after-line", "1", "--text", "x", "-o", &s(&e)]);
+    run.fails("invalid_invocation");
+    dsd(["insert-paragraph", &s(&w.src()), "--text", "x", "-o", &s(&e)]).fails("invalid_invocation");
+    let f = w.path("f.dsd");
+    // An anchor inside the form's TABLE-GROUP places the paragraph beside the group.
+    let r = dsd(["insert-paragraph", &s(&w.src()), "--after-table", "1", "--text", "뒤", "-o", &s(&f)]).ok();
+    assert!(r["changes"][0]["notes"][0].as_str().unwrap().contains("TABLE-GROUP"));
+    let xml = contents_of(&f);
+    let (group_end, p) = (xml.find("</TABLE-GROUP>").unwrap() + "</TABLE-GROUP>".len(), xml.find("<P>뒤</P>").unwrap());
+    assert!(p >= group_end && xml[group_end..p].trim().is_empty(), "the paragraph follows the group");
+    dsd(["copy-row", &s(&w.src()), "--table", "4", "--row", "3", "--count", "1001", "-o", &s(&w.path("g.dsd"))])
+        .fails("invalid_argument");
+    dsd(["delete-paragraph", &s(&w.src()), "--line", "1", "-o", &s(&e)]).fails("invalid_argument");
+}
+
+#[test]
+fn structural_edits_handle_nested_tables() {
+    let w = Work::new("nested");
+    let nested = "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">기타
+<TABLE BORDER=\"1\" WIDTH=\"100\">
+<COLGROUP WIDTH=\"100\">
+<COL WIDTH=\"100\"></COL>
+</COLGROUP>
+<TBODY>
+<TR HEIGHT=\"30\">
+<TD HEIGHT=\"23\" WIDTH=\"91\">내부</TD>
+</TR>
+</TBODY>
+</TABLE>
+</TD>";
+    let v = w.variant(
+        "v.dsd",
+        &replace_once(&w.contents(), "<TD HEIGHT=\"23\" VALIGN=\"MIDDLE\" WIDTH=\"191\">기타</TD>", nested),
+    );
+    let (a, b) = (w.path("a.dsd"), w.path("b.dsd"));
+    dsd(["copy-row", &s(&v), "--table", "4", "--row", "4", "--clear", "-o", &s(&a)]).ok();
+    let xml = contents_of(&a);
+    assert_eq!(xml.matches("내부").count(), 1, "the copy's nested text is cleared");
+    assert_eq!(xml.matches("기타").count(), 1, "the copy's own text is cleared");
+    let r = dsd(["delete-table", &s(&v), "--table", "4", "-o", &s(&b)]).ok();
+    assert!(r["changes"][0]["notes"][0].as_str().unwrap().contains("renumbered by -2"));
+}
+
+#[test]
+fn replace_leaves_protected_phrases_alone() {
+    let w = Work::new("except");
+    let v =
+        w.variant("v.dsd", &replace_once(&w.contents(), "<P>1. 일반사항</P>", "<P>당반기 분ㆍ반기 검토 반기말</P>"));
+    let r = dsd(["replace", &s(&v), "--old", "반기", "--new", "분기", "--except", "분ㆍ반기", "--dry-run"]).ok();
+    assert_eq!((r["count"].as_u64(), r["skipped"].as_u64()), (Some(2), Some(1)));
+    let o = w.path("o.dsd");
+    let r = dsd([
+        "replace",
+        &s(&v),
+        "--old",
+        "반기",
+        "--new",
+        "분기",
+        "--except",
+        "분ㆍ반기",
+        "--expect",
+        "2",
+        "-o",
+        &s(&o),
+    ])
+    .ok();
+    assert!(r["changes"][0]["notes"][0].as_str().unwrap().contains("1 occurrence(s)"));
+    assert!(contents_of(&o).contains("<P>당분기 분ㆍ반기 검토 분기말</P>"));
+}
+
+#[test]
+fn apply_runs_structural_ops() {
+    let w = Work::new("apply-structure");
+    let edits = w.path("edits.json");
+    std::fs::write(
+        &edits,
+        json!([
+            {"op": "copy-col", "table": 3, "col": 3, "clear": true},
+            {"op": "set-cell", "table": 3, "row": 1, "col": 4, "text": "제 3 기"},
+            {"op": "copy-row", "table": 4, "row": 3, "clear": true},
+            {"op": "delete-table", "table": 2},
+            {"op": "insert-paragraph", "text": "끝", "after_table": 3},
+            {"op": "replace", "old": "제 5 기", "new": "제 6 기", "except": ["없음"]},
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let o = w.path("o.dsd");
+    let r = dsd(["apply", &s(&w.src()), &s(&edits), "-o", &s(&o)]).ok();
+    assert_eq!(r["changes"].as_array().unwrap().len(), 6);
+    let t = &dsd(["table", &s(&o), "2"]).ok()["tables"][0];
+    assert_eq!(t["rows"][0]["cells"][3]["text"], "제 3 기");
+    checks_clean(&o, &w.src());
+    std::fs::write(&edits, json!([{"op": "insert-paragraph", "text": "x"}]).to_string()).unwrap();
+    dsd(["apply", &s(&w.src()), &s(&edits), "-o", &s(&w.path("p.dsd"))]).fails("invalid_argument");
+    std::fs::write(&edits, json!([{"op": "replace", "old": "a", "new": "b", "except": "x"}]).to_string()).unwrap();
+    dsd(["apply", &s(&w.src()), &s(&edits), "-o", &s(&w.path("p.dsd"))]).fails("invalid_argument");
+}
+
+#[test]
+fn compare_never_writes_over_its_inputs() {
+    let w = Work::new("compare-guard");
+    let other = w.path("other.dsd");
+    std::fs::copy(w.src(), &other).unwrap();
+    let before = std::fs::read(&other).unwrap();
+    let run = dsd(["compare", &s(&w.src()), &s(&other), "--format", "html", "-o", &s(&other), "--force"]);
+    run.fails("output_exists");
+    assert_eq!(std::fs::read(&other).unwrap(), before);
+}
+
+#[test]
+fn compare_aligns_by_content() {
+    let w = Work::new("compare");
+    // Other side: a value changed, a row inserted, a column added, a table and
+    // a paragraph reworded, and the shareholder table removed.
+    let edits = w.path("edits.json");
+    std::fs::write(
+        &edits,
+        json!([
+            {"op": "set-cell", "table": 3, "row": 3, "col": 2, "text": "1,600,000"},
+            {"op": "copy-row", "table": 3, "row": 4, "clear": true},
+            {"op": "set-cell", "table": 3, "row": 5, "col": 1, "text": "   기타자산"},
+            {"op": "set-cell", "table": 3, "row": 5, "col": 2, "text": "100,000"},
+            {"op": "delete-table", "table": 4},
+            {"op": "replace", "old": "1. 일반사항", "new": "1. 일반사항 및 개요"},
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let other = w.path("other.dsd");
+    dsd(["apply", &s(&w.src()), &s(&edits), "-o", &s(&other)]).ok();
+    let r = dsd(["compare", &s(&w.src()), &s(&other)]).ok();
+    let items = r["items"].as_array().unwrap();
+    let t3 = items.iter().find(|i| i["base"]["table"] == 3).unwrap();
+    assert_eq!(t3["status"], "changed");
+    let cell = t3["cells"].as_array().unwrap().iter().find(|c| c["kind"] == "value").unwrap();
+    assert_eq!((cell["base"].as_str(), cell["delta"].as_str()), (Some("R3C2"), Some("+100,000")));
+    assert_eq!(cell["rowLabel"], "Ⅰ.유동자산");
+    assert!(t3["rows"].as_array().unwrap().iter().any(|r| r["kind"] == "onlyOther" && r["other"] == 5));
+    assert!(items.iter().any(|i| i["base"]["table"] == 4 && i["status"] == "onlyBase"));
+    let text = items.iter().find(|i| i["kind"] == "text" && i["status"] == "changed").unwrap();
+    assert_eq!(text["text"]["fragments"][0], json!({"base": "", "other": "및 개요"}));
+    assert!(items.iter().all(|i| i["status"] != "same"), "same items are listed only with --all");
+    let all = dsd(["compare", &s(&w.src()), &s(&other), "--all"]).ok();
+    assert!(all["items"].as_array().unwrap().iter().any(|i| i["status"] == "same"));
+    assert_eq!(all["summary"]["valueChanges"], r["summary"]["valueChanges"]);
+
+    let txt = dsd(["compare", &s(&w.src()), &s(&other), "--format", "text"]).stdout;
+    assert!(txt.contains("R3C2 -> R3C2 Ⅰ.유동자산 / 제 5 기: \"1,500,000\" -> \"1,600,000\"  Δ +100,000"), "{txt}");
+    dsd(["compare", &s(&w.src()), &s(&other), "--format", "html"]).fails("invalid_argument");
+    let html = w.path("c.html");
+    let r = dsd(["compare", &s(&w.src()), &s(&other), "--format", "html", "-o", &s(&html)]).ok();
+    assert_eq!(r["format"], "html");
+    let page = std::fs::read_to_string(&html).unwrap();
+    assert!(page.starts_with("<!doctype html>") && page.contains("class=\"chg-o\"") && page.contains("<ins>및</ins>"));
+    assert!(!page.contains("http://") && !page.contains("https://"), "the report loads nothing external");
+    dsd(["compare", &s(&w.src()), &s(&other), "--format", "html", "-o", &s(&html)]).fails("output_exists");
+
+    // Same document: nothing differs.
+    let same = dsd(["compare", &s(&w.src()), &s(&w.src())]).ok();
+    assert_eq!((same["summary"]["changed"].as_u64(), same["items"].as_array().unwrap().len()), (Some(0), 0));
+}
+
+#[test]
+fn compare_matches_columns_by_header_and_moved_rows() {
+    let w = Work::new("compare-cols");
+    let edits = w.path("edits.json");
+    std::fs::write(
+        &edits,
+        json!([
+            {"op": "copy-col", "table": 3, "col": 2},
+            {"op": "set-cell", "table": 3, "row": 1, "col": 2, "text": "제 6 기"},
+            {"op": "copy-row", "table": 3, "row": 3},
+            {"op": "delete-row", "table": 3, "row": 3},
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let other = w.path("other.dsd");
+    dsd(["apply", &s(&w.src()), &s(&edits), "-o", &s(&other)]).ok();
+    let r = dsd(["compare", &s(&w.src()), &s(&other)]).ok();
+    let t3 = r["items"].as_array().unwrap().iter().find(|i| i["base"]["table"] == 3).unwrap().clone();
+    assert_eq!(t3["columns"], json!([{"kind": "onlyOther", "other": 2, "header": "제 6 기"}]));
+    assert!(t3["cells"].as_array().is_none_or(Vec::is_empty), "{t3}");
 }
 
 #[test]

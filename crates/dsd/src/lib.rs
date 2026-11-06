@@ -8,12 +8,14 @@
 
 pub mod archive;
 pub mod check;
+pub mod compare;
 pub mod diff;
 pub mod difflib;
 pub mod doc;
 pub mod edit;
 mod error;
 pub mod schema;
+pub mod structure;
 pub mod text;
 pub mod views;
 pub mod xml;

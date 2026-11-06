@@ -4,13 +4,20 @@
 pub const APPLY_AFTER: &str = "\
 Edit objects (required fields first; ? marks optional ones):
   set-cell   table: int, row: int, col: int, text: str, unit_value?: str, flatten?: bool
-  replace    old: str, new: str, expect?: int|\"any\", table?: int
+  replace    old: str, new: str, expect?: int|\"any\", table?: int, except?: [str]
   copy-row   table: int, row: int, count?: int, clear?: bool, force_locked?: bool
   delete-row table: int, row: int, force_locked?: bool
+  copy-col   table: int, col: int, count?: int, clear?: bool, force_locked?: bool
+  delete-col table: int, col: int, force_locked?: bool
+  copy-table table: int, count?: int, clear?: bool, force_locked?: bool
+  delete-table table: int, force_locked?: bool
+  insert-paragraph text: str, after_table?: int, before_table?: int, after_line?: int
+  delete-paragraph line: int
 
-Edits run in order and later ones see earlier results: row numbers refer to the
-table after earlier insertions or deletions, so list them bottom-up or account
-for the shift. Nothing is written unless every edit succeeds.
+Edits run in order and later ones see earlier results: row, column, table,
+and line numbers refer to the document after earlier insertions or deletions,
+so list them bottom-up or account for the shift. Nothing is written unless
+every edit succeeds.
 
 Example:
   [{\"op\": \"set-cell\", \"table\": 3, \"row\": 4, \"col\": 2, \"text\": \"1,100,000\"},

@@ -22,8 +22,11 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   ([views.rs](crates/dsd/src/views.rs)), checks
   ([check.rs](crates/dsd/src/check.rs)), schema validation
   ([schema.rs](crates/dsd/src/schema.rs)), edits and extract/pack
-  ([edit.rs](crates/dsd/src/edit.rs)), and block diffs
-  ([diff.rs](crates/dsd/src/diff.rs), [difflib.rs](crates/dsd/src/difflib.rs)).
+  ([edit.rs](crates/dsd/src/edit.rs)), structural row, column, table, and
+  paragraph edits ([structure.rs](crates/dsd/src/structure.rs)), block diffs
+  ([diff.rs](crates/dsd/src/diff.rs), [difflib.rs](crates/dsd/src/difflib.rs)),
+  and content-aligned comparison with its reports
+  ([compare.rs](crates/dsd/src/compare.rs)).
   It has no network access and no process I/O.
 - [`crates/dsd-cli`](crates/dsd-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document. It alone contacts GitHub,
@@ -45,6 +48,13 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   the output is re-read and its replaced members compared before success is
   reported. Outputs never replace an existing file or the input without
   `--force`, and are written through a synced temporary file and a rename.
+  Views and reports (`read -o`, `compare -o`) never replace a source
+  document, even with `--force`.
+- **Structural consistency.** Structural edits keep every row covering every
+  column: copies join the spans they lie inside, deletions shrink them (a
+  spanning cell moves down when its anchor row goes), and `HEIGHT`/`WIDTH`
+  follow the size arithmetic in the format reference, including a table's
+  Dart3-era width convention.
 - **Verified scope.** Rules apply only to elements in `OBSERVED_TAGS` and
   `SCHEMA_EQUIVALENT_TAGS` ([doc.rs](crates/dsd/src/doc.rs)) and the two
   observed schemas. Anything else is shown as found, flagged `unverified-*`,
@@ -54,8 +64,10 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   constructs the DART schemas use and reports any other as
   `schema-unsupported`; it reads the user's installed schema and ships none.
 - **Bounds.** Archive size, member count, per-member and total decompressed
-  size, XML nesting depth, and table grid width are capped, so hostile input
-  fails with an envelope instead of exhausting memory or the stack.
+  size, XML nesting depth, table grid width, copy counts, and the pairing work
+  of `diff` and `compare` are capped, so hostile input fails with an envelope
+  (or falls back to positional pairing) instead of exhausting memory, time,
+  or the stack.
 
 ## Process contract
 
@@ -64,7 +76,8 @@ Contract version 1 (`metadata.contract`):
 - stdout carries exactly one newline-terminated document: the JSON envelope
   `{ok, command, result, warnings, error, metadata}`, or plain text for help,
   `--version`, and successful `--format text` views. Failures are always
-  JSON.
+  JSON. Output a command writes to a file (`read -o`, `compare -o`, including
+  the HTML report) leaves stdout to a summary envelope.
 - Exit 0 means `ok: true`; 1 is an execution failure with a stable
   `error.code` (`file_not_found`, `invalid_archive`, `invalid_xml`,
   `invalid_argument`, `text_not_found`, `count_mismatch`, `edit_refused`,

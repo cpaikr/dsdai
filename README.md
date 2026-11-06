@@ -22,17 +22,26 @@ DART Editor stays the authority for layout and filing.
 
 - **Read:** `inspect` (no document text), `outline`, `read` (exact text of
   every block), `table` (cells with `R#`/`C#`), `find`
-- **Edit:** `set-cell`, `replace`, `copy-row`, `delete-row`, `apply` (JSON
-  batch), and `extract`/`pack` for hand edits of `contents.xml`
+- **Edit:** `set-cell`, `replace`, rows (`copy-row`, `delete-row`), columns
+  (`copy-col`, `delete-col`), tables (`copy-table`, `delete-table`),
+  paragraphs (`insert-paragraph`, `delete-paragraph`), `apply` (JSON batch),
+  and `extract`/`pack` for hand edits of `contents.xml`. Structural edits keep
+  spans and sizes consistent the way DART Editor writes them.
 - **Verify:** `check` (structure, images, TOC, table grids, unit values, and
-  validation against an installed DART schema), `diff`
+  validation against an installed DART schema), `diff` (one file against its
+  edit, by position)
+- **Compare:** `compare` aligns two documents by content, even across forms
+  and reordered tables, and reports table, row, column, cell (with numeric
+  deltas), and wording differences as JSON, text, or a self-contained
+  side-by-side HTML report
 - **Maintain:** `version [--check]`, `upgrade [--check]`
 
 Every command prints one JSON object to stdout,
 `{ok, command, result, warnings, error, metadata}`, and exits 0 on success,
 1 on failure (including `check` finding errors), or 2 for an invalid
-invocation. `outline`, `read`, `table`, `find`, and `diff` also take
-`--format text` for a compact listing. `dsd --help` and `dsd <command> --help`
+invocation. `outline`, `read`, `table`, `find`, `diff`, and `compare` also
+take `--format text` for a compact listing; `compare --format html -o FILE`
+writes the report. `dsd --help` and `dsd <command> --help`
 document every option.
 
 ```sh
@@ -40,6 +49,7 @@ dsd find report.dsd 현금및현금성자산 --format text
 dsd set-cell report.dsd -o report_수정.dsd --table 3 --row 4 --col 2 --text 1,100,000
 dsd check report_수정.dsd --against report.dsd
 dsd diff report.dsd report_수정.dsd --format text
+dsd compare filed.dsd draft.dsd --format html -o compare.html
 ```
 
 Schema validation reads the DART schema installed with DART Editor
