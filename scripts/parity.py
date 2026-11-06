@@ -18,6 +18,7 @@ Usage: python scripts/parity.py [path/to/dsd]
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -38,7 +39,8 @@ def py(*args: str) -> subprocess.CompletedProcess:
 
 
 def rs(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run([str(RUST), *args], capture_output=True)
+    # Release checks would add network refreshes and advisories to the comparison.
+    return subprocess.run([str(RUST), *args], capture_output=True, env={**os.environ, "DSD_NO_UPDATE_CHECK": "1"})
 
 
 def text(proc: subprocess.CompletedProcess) -> str:

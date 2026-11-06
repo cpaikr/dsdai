@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing source tag to publish; leave empty for a build-only candidate run"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    if: github.event_name == 'workflow_dispatch' && github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      source_tag: ${{ steps.source.outputs.source_tag }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+    steps:
+      - name: Check out repository for tag verification
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and verify source tag
+        id: source
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          DISPATCH_REF: ${{ github.ref }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$DISPATCH_TAG" ]; then
+            echo "source_tag=" >> "$GITHUB_OUTPUT"
+            echo "source_sha=$CANDIDATE_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Publication runs only the workflow definition reviewed on main.
+          if [ "$DISPATCH_REF" != refs/heads/main ]; then
+            echo "Dispatch Release from main to publish a tag, not $DISPATCH_REF." >&2
+            exit 1
+          fi
+
+          SOURCE_TAG="$DISPATCH_TAG"
+          if [[ ! "$SOURCE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Source tag $SOURCE_TAG is not a stable vX.Y.Z tag." >&2
+            exit 1
+          fi
+
+          TAG_REF="refs/tags/$SOURCE_TAG"
+          if ! TAG_OBJECT_SHA="$(git ls-remote --exit-code --refs origin "$TAG_REF" | awk -v tag_ref="$TAG_REF" '$2 == tag_ref { print $1; exit }')"; then
+            echo "No source tag exists at $TAG_REF." >&2
+            exit 1
+          fi
+          if [ -z "$TAG_OBJECT_SHA" ]; then
+            echo "Remote did not return the expected ref $TAG_REF." >&2
+            exit 1
+          fi
+          PEELED_SHA="$(git ls-remote origin "${TAG_REF}^{}" | awk -v peeled_ref="${TAG_REF}^{}" '$2 == peeled_ref { print $1; exit }')"
+          SOURCE_SHA="${PEELED_SHA:-$TAG_OBJECT_SHA}"
+          git fetch --force --no-tags origin "$TAG_REF:$TAG_REF"
+          RESOLVED_SHA="$(git rev-parse --verify "${TAG_REF}^{commit}")"
+          if [ "$RESOLVED_SHA" != "$SOURCE_SHA" ]; then
+            echo "Tag $TAG_REF resolved to $RESOLVED_SHA, expected $SOURCE_SHA." >&2
+            exit 1
+          fi
+
+          echo "source_tag=$SOURCE_TAG" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the immutable source
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - name: Require the tag on main
+        if: steps.source.outputs.source_tag != ''
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD; then
+            echo "Source commit $SOURCE_SHA is not on main." >&2
+            exit 1
+          fi
+
+      - name: Require successful CI for the exact source commit
+        if: steps.source.outputs.source_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          # A maintainer dispatch on main, as in darty. PR runs are not accepted:
+          # GitHub merges rewrite SHAs, and a run whose gated jobs were all
+          # skipped must never count as validation.
+          CI_RUN_ID="$(
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SOURCE_SHA}&event=workflow_dispatch&per_page=100" \
+              --jq ".workflow_runs[] | select(.head_sha == \"${SOURCE_SHA}\" and .conclusion == \"success\" and .actor.login == \"sjunepark\" and .triggering_actor.login == \"sjunepark\" and .event == \"workflow_dispatch\" and .head_branch == \"main\") | .id" |
+              head -n 1
+          )"
+          if [ -z "$CI_RUN_ID" ]; then
+            echo "No successful CI workflow run validates source commit $SOURCE_SHA." >&2
+            exit 1
+          fi
+          echo "CI workflow run $CI_RUN_ID validates source commit $SOURCE_SHA."
+
+      - name: Require the Cargo version to match the tag
+        env:
+          SOURCE_TAG: ${{ steps.source.outputs.source_tag }}
+        run: |
+          if [ -n "$SOURCE_TAG" ]; then
+            python3 scripts/release.py version --tag "$SOURCE_TAG"
+          else
+            python3 scripts/release.py version
+          fi
+
+  standalone:
+    if: github.event_name == 'workflow_dispatch' && github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark'
+    needs: metadata
+    uses: ./.github/workflows/standalone.yml
+    with:
+      source_sha: ${{ needs.metadata.outputs.source_sha }}
+
+  github_release:
+    if: github.event_name == 'workflow_dispatch' && github.actor == 'sjunepark' && github.triggering_actor == 'sjunepark' && needs.metadata.outputs.source_tag != ''
+    needs: [metadata, standalone]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      SOURCE_TAG: ${{ needs.metadata.outputs.source_tag }}
+      SOURCE_SHA: ${{ needs.metadata.outputs.source_sha }}
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.metadata.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: dsd-release
+          path: release-artifact/bundle
+
+      - name: Recheck source tag immediately before release completion
+        run: |
+          set -euo pipefail
+          TAG_REF="refs/tags/$SOURCE_TAG"
+          if ! git ls-remote --exit-code --refs origin "$TAG_REF" >/dev/null; then
+            echo "Source tag $TAG_REF no longer exists." >&2
+            exit 1
+          fi
+          git fetch --force --no-tags origin "$TAG_REF:$TAG_REF"
+          RESOLVED_SHA="$(git rev-parse --verify "${TAG_REF}^{commit}")"
+          if [ "$RESOLVED_SHA" != "$SOURCE_SHA" ]; then
+            echo "Tag $TAG_REF resolved to $RESOLVED_SHA, expected $SOURCE_SHA." >&2
+            exit 1
+          fi
+
+      - name: Create or verify GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/release.py publish
+          --repository "$GITHUB_REPOSITORY"
+          --tag "$SOURCE_TAG"
+          --sha "$SOURCE_SHA"
+          --directory release-artifact/bundle

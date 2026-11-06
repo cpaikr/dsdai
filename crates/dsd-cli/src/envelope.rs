@@ -3,7 +3,9 @@
 //! Every JSON invocation prints one newline-terminated object:
 //! `{ok, command, result, warnings, error, metadata}`. `ok` is true exactly
 //! when the exit status is 0. `error.code` is a stable category; messages
-//! and hints are for people.
+//! and hints are for people. A successful envelope may also carry a top-level
+//! `advisories` array holding at most one release notice; advisories never
+//! change `ok`, `result`, or the exit status.
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -67,6 +69,12 @@ impl Failure {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Error::new(code, message).into()
     }
+
+    /// A failure whose category belongs to the CLI rather than the library,
+    /// such as an upgrade error.
+    pub fn cli(code: &'static str, message: impl Into<String>, hint: Option<String>) -> Self {
+        Self { code, message: message.into(), hint, issues: Vec::new(), result: None, usage: false }
+    }
 }
 
 pub struct Envelope(Value);
@@ -85,6 +93,14 @@ impl Envelope {
         map.insert("error".into(), Value::Null);
         map.insert("metadata".into(), metadata());
         Self(Value::Object(map))
+    }
+
+    /// Adds release advisories to a success envelope; none leaves it unchanged.
+    pub fn with_advisories(mut self, advisories: Vec<Value>) -> Self {
+        if let (Value::Object(map), false) = (&mut self.0, advisories.is_empty()) {
+            map.insert("advisories".into(), Value::Array(advisories));
+        }
+        self
     }
 
     pub fn failure(command: &str, failure: &Failure) -> Self {

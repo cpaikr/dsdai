@@ -83,17 +83,32 @@ def run_unit_tests() -> None:
 
 def run_cargo() -> None:
     """Format, lint, and test the Rust workspace (this also checks that the
-    public fixture matches fixtures/public/sample/)."""
+    public fixture matches fixtures/public/sample/). Tests run with the
+    test-only fixture-origin feature, which enables the release-check and
+    upgrade tests against a local release origin; lints cover both builds."""
     for args in (
         ["fmt", "--all", "--check"],
         ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
-        ["test", "--workspace", "--locked"],
+        ["clippy", "--workspace", "--all-targets", "--all-features", "--locked", "--", "-D", "warnings"],
+        ["test", "--workspace", "--all-features", "--locked"],
     ):
         proc = subprocess.run(["cargo", *args], cwd=ROOT)
+        label = args[0] + (" --all-features" if "--all-features" in args else "")
         if proc.returncode != 0:
-            fail(f"cargo {args[0]}")
+            fail(f"cargo {label}")
         else:
-            print(f"ok   cargo {args[0]}")
+            print(f"ok   cargo {label}")
+
+
+def run_release_tests() -> None:
+    """Unit tests for the release tooling in scripts/release.py."""
+    tests = ROOT / "scripts" / "tests"
+    suite = unittest.defaultTestLoader.discover(str(tests), pattern="test_*.py", top_level_dir=str(tests))
+    result = unittest.TextTestRunner(verbosity=0, stream=sys.stdout).run(suite)
+    if not result.wasSuccessful():
+        fail("release tooling unit tests")
+    else:
+        print(f"ok   {result.testsRun} release tooling unit tests")
 
 
 def private_smoke() -> None:
@@ -140,6 +155,7 @@ def main() -> int:
         check_skill(skill)
     run_cargo()
     run_unit_tests()
+    run_release_tests()
     private_smoke()
     if errors:
         print(f"\n{len(errors)} check(s) failed")
