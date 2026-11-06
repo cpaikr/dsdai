@@ -11,6 +11,7 @@ sample indexes and counts, never document text or file names.
 from __future__ import annotations
 
 import json
+from collections import Counter
 import os
 import re
 import subprocess
@@ -106,7 +107,14 @@ def run_release_tests() -> None:
 
 
 SCAFFOLD = {"COMMENT", "LIBRARYLIST", "FILENAME"}
-EXE = ROOT / "target" / "debug" / ("dsd.exe" if sys.platform == "win32" else "dsd")
+def executable() -> Path:
+    """The debug `dsd` in Cargo's target directory, honoring CARGO_TARGET_DIR."""
+    proc = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, capture_output=True)
+    target = Path(json.loads(proc.stdout)["target_directory"]) if proc.returncode == 0 else ROOT / "target"
+    return target / "debug" / ("dsd.exe" if sys.platform == "win32" else "dsd")
+
+
+EXE = executable()
 
 
 def dsd(*args: str) -> dict:
@@ -139,7 +147,7 @@ def corpus_smoke() -> None:
     files = [ROOT / "fixtures" / "public" / "sample.dsd"]
     files += sorted(PRIVATE.glob("*.dsd")) if PRIVATE.is_dir() else []
     if not EXE.is_file():
-        fail(f"{EXE.relative_to(ROOT)} is missing; cargo test builds it")
+        fail(f"{EXE} is missing; cargo test builds it")
         return
     with tempfile.TemporaryDirectory() as tmp:
         for i, src in enumerate(files):
@@ -162,9 +170,10 @@ def corpus_smoke() -> None:
             else:
                 # Unverified elements or schemas prompt verifying the CLI on this
                 # sample and extending OBSERVED_TAGS; they are not failures.
-                for issue in results["check"]["issues"]:
-                    if issue["code"].startswith("unverified-"):
-                        print(f"note {label}: {issue['code']} {issue['message'].split(':')[0]}")
+                # Codes and counts only: messages can carry document values.
+                unverified = Counter(i["code"] for i in results["check"]["issues"] if i["code"].startswith("unverified-"))
+                for code, count in sorted(unverified.items()):
+                    print(f"note {label}: {code} x{count}")
                 shown = squeeze("".join(r.get("text", "") for r in results["read"]["rows"]))
                 if shown != source_text(src):
                     fail(f"{label}: read omits or alters text outside tables")

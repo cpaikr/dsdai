@@ -35,7 +35,9 @@
 ## Working rules
 
 - The process contract is a compatibility surface: one newline-terminated
-  JSON envelope per invocation, stable `error.code` values, exit 0/1/2. Add
+  stdout document per invocation — a JSON envelope, except plain text for help,
+  `--version`, and successful `--format text` views (failures are always
+  JSON) — stable `error.code` values, and exit 0/1/2. Add
   fields additively; a breaking change needs a new `metadata.contract`.
 - Never re-serialize XML or re-zip with a generic writer; edits splice byte
   ranges. A behavior change needs a test in `crates/dsd-cli/tests/cli.rs`

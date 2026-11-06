@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use dsd::doc::{OBSERVED_TAGS, SCHEMA_EQUIVALENT_TAGS};
+use dsd::doc::{OBSERVED_SCHEMAS, OBSERVED_TAGS, SCHEMA_EQUIVALENT_TAGS};
 use dsd::xml::{self, NodeId, Tree};
 
 fn repo() -> PathBuf {
@@ -80,9 +80,11 @@ fn schema_equivalent_tags_match_installed_schemas() {
     ];
     assert_eq!(pairs.iter().map(|p| p.0).collect::<BTreeSet<_>>(), SCHEMA_EQUIVALENT_TAGS.iter().copied().collect());
     let mut checked = 0;
-    for path in
-        entries.map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("xsd")))
-    {
+    // Only the schemas the equivalence claim is about; other files may sit beside them.
+    let claimed = |p: &PathBuf| {
+        p.file_name().is_some_and(|n| OBSERVED_SCHEMAS.contains(&n.to_string_lossy().to_lowercase().as_str()))
+    };
+    for path in entries.map(|e| e.unwrap().path()).filter(claimed) {
         let tree = xml::parse(&std::fs::read(&path).unwrap()).unwrap();
         let all = tree.descendants(tree.root);
         let types: BTreeMap<&str, NodeId> = all
