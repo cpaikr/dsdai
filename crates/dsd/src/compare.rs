@@ -1395,8 +1395,10 @@ fn marks(item: &Item, index: usize, base_side: bool) -> CellMarks {
             }
             m.title.insert(key, t);
             // Numbers keep the whole-cell mark and Δ: marking digits of two different
-            // amounts would scatter highlights that mean nothing.
-            if c.kind == CellKind::Text {
+            // amounts would scatter highlights that mean nothing. A non-numeric format
+            // change (only a note reference or company-name form differs) is marked.
+            let numeric = parse_number(&c.base_text).is_some() || parse_number(&c.other_text).is_some();
+            if c.kind == CellKind::Text || (c.kind == CellKind::Format && !numeric) {
                 m.counterpart.insert(key, if base_side { c.other_text.clone() } else { c.base_text.clone() });
             }
         }
@@ -1493,18 +1495,24 @@ fn render_table(doc: &Doc, table: &Table, marks: &CellMarks) -> String {
 /// and scattered character marks would only add noise.
 const CHAR_MARK_SHARE: f64 = 0.5;
 
+/// Character pairs (base × other length) a replaced run may cost to align; longer
+/// runs keep whole-word marks, since alignment is quadratic in the worst case.
+const CHAR_MARK_BUDGET: usize = 250_000;
+
 /// Characters of `words` (each word then its following space) to mark against `other`.
 fn char_flags(words: &[(String, String)], other: &[(String, String)]) -> Vec<bool> {
     let flat = |ws: &[(String, String)]| ws.iter().flat_map(|(w, s)| w.chars().chain(s.chars())).collect::<Vec<_>>();
     let (a, b) = (flat(words), flat(other));
-    let m = Matcher::new(&a, &b);
-    let kept: usize = m.matching_blocks().iter().map(|&(_, _, n)| n).sum();
-    let shorter = a.len().min(b.len()).max(1);
-    if (kept as f64) < CHAR_MARK_SHARE * shorter as f64 {
+    if a.len().saturating_mul(b.len()) > CHAR_MARK_BUDGET {
+        return vec![true; a.len()];
+    }
+    let ops = Matcher::new(&a, &b).opcodes();
+    let kept: usize = ops.iter().filter(|o| o.0 == Tag::Equal).map(|o| o.2 - o.1).sum();
+    if (kept as f64) < CHAR_MARK_SHARE * a.len().min(b.len()).max(1) as f64 {
         return vec![true; a.len()];
     }
     let mut flags = vec![false; a.len()];
-    for (tag, i1, i2, _, _) in m.opcodes() {
+    for (tag, i1, i2, _, _) in ops {
         if tag != Tag::Equal {
             flags[i1..i2].fill(true);
         }
@@ -2005,6 +2013,9 @@ mod tests {
         assert_eq!(render_words("가나다", Some("라마바"), true), "<del>가나다</del>");
         assert_eq!(render_words("가 나 다", Some("가 다"), false), "가 <ins>나</ins> 다");
         assert_eq!(render_words("a<b", Some("a<c"), false), "a&lt;<ins>b</ins>");
+        // A run too long to align within the budget keeps whole-word marks.
+        let long = "가".repeat(8000);
+        assert_eq!(render_words(&format!("{long}나"), Some(&long), false), format!("<ins>{long}나</ins>"));
     }
 
     #[test]
