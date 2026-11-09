@@ -75,7 +75,8 @@ produces `target/release/dsd`.
 ## Installation
 
 These instructions apply to releases from
-[v0.1.0](https://github.com/cpaikr/dsdai/releases/tag/v0.1.0), the first.
+[v0.1.0](https://github.com/cpaikr/dsdai/releases/tag/v0.1.0), the first; the latest is
+[v0.1.1](https://github.com/cpaikr/dsdai/releases/tag/v0.1.1).
 
 Download the archive for your platform, `SHA256SUMS`, and the matching
 installer from the same [GitHub Release](https://github.com/cpaikr/dsdai/releases).
