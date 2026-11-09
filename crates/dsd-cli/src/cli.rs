@@ -108,10 +108,12 @@ and 주식회사/(주)/㈜ spellings are ignored) and columns by their headers w
 column counts differ. Numbers compare as numbers: kind \"value\" carries
 delta = OTHER - BASE; \"format\" is the same number written differently.
 
-JSON and text list only items that differ unless --all; html renders both
-documents side by side with changed cells and words highlighted, a section
-index, next/previous navigation (n/p), and a changes-only filter. The report is
-one self-contained file with no external resources; it needs -o.";
+JSON and text list only items that differ unless --all; html renders each
+document in its own pane at DART's sizes, aligned item by item and scrolling
+together, with changed cells and words highlighted, a change map, a section
+index, next/previous navigation (n/p), a changes-only filter, and a panel
+listing the selected item's changes (i). The report is one self-contained file
+with no external resources; it needs -o.";
 
 const STRUCTURE_AFTER: &str = "\
 Copies join every span they lie inside: copying a row that sits under a

@@ -960,6 +960,15 @@ fn compare_aligns_by_content() {
     assert_eq!(r["format"], "html");
     let page = std::fs::read_to_string(&html).unwrap();
     assert!(page.starts_with("<!doctype html>") && page.contains("class=\"chg-o\"") && page.contains("<ins>및</ins>"));
+    // One pane per document, with one block per item in each, so the panes align.
+    let pane = |id: &str| {
+        let start = page.find(&format!("id=\"{id}\"")).unwrap();
+        let end = page[start..].find("<div class=\"col ").map_or(page.len(), |e| start + e);
+        page[start..end].matches("class=\"blk ").count()
+    };
+    assert!(pane("pb") > 0 && pane("pb") == pane("po"), "{} vs {}", pane("pb"), pane("po"));
+    assert!(page.contains("<col style=\"width:"), "tables keep DART's column widths");
+    assert!(page.contains("<template id=\"d"), "changed items carry a change list");
     assert!(!page.contains("http://") && !page.contains("https://"), "the report loads nothing external");
     dsd(["compare", &s(&w.src()), &s(&other), "--format", "html", "-o", &s(&html)]).fails("output_exists");
 
