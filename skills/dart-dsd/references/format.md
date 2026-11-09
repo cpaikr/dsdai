@@ -88,7 +88,8 @@ DOCUMENT  (xsi:noNamespaceSchemaLocation="dart4.xsd" or "dart3.xsd")
 
 `USERMARK` tokens (**inferred**): `F-n` font size n, `F-BTn`/`F-GLn` a font
 family at size n, `B` bold, `!B` not bold, `0X` plus six hex digits a text
-color, `BC0X` plus six hex digits a background color, `A-L` left alignment.
+color, `BC0X` plus six hex digits a background color, `A-L`/`A-C`/`A-R`
+left, center, or right alignment.
 Copy them from neighbors rather than composing new ones.
 
 ## Tables

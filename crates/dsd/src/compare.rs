@@ -1233,6 +1233,11 @@ pub fn render_text(c: &Comparison, items: &[&Item]) -> String {
 
 // ---------------------------------------------------------------------------
 // HTML report
+//
+// Two panes, one per document, rendered at DART's own sizes (column widths,
+// row heights, USERMARK fonts) and aligned item by item: each item is one
+// block in each pane, and the page script gives both blocks the taller one's
+// height, so the panes scroll together line for line.
 
 fn esc(text: &str) -> String {
     let mut s = String::with_capacity(text.len());
@@ -1253,8 +1258,91 @@ fn esc_lines(text: &str) -> String {
     esc(text).replace('\n', "<br>")
 }
 
-fn css_align(doc: &Doc, node: NodeId) -> String {
-    let mut style = String::new();
+const BATANG: &str = "Batang,'바탕',AppleMyungjo,serif";
+const GULIM: &str = "Gulim,'굴림',AppleGothic,sans-serif";
+
+fn hex6(s: &str) -> Option<&str> {
+    (s.len() == 6 && s.bytes().all(|b| b.is_ascii_hexdigit())).then_some(s)
+}
+
+/// CSS for a `USERMARK` (see the format reference): `F-n` size in points,
+/// `F-BTn`/`F-GLn` family and size, `B`/`!B` weight, `0X…` text and `BC0X…`
+/// background color, `A-L`/`A-C`/`A-R` alignment. Unknown tokens are ignored and
+/// every value is validated, so the result is safe inside a style attribute.
+fn usermark_css(mark: &str) -> String {
+    let mut s = String::new();
+    for t in mark.split_whitespace() {
+        if let Some(rest) = t.strip_prefix("BC0X") {
+            if let Some(hex) = hex6(rest) {
+                let _ = write!(s, "background-color:#{hex};");
+            }
+        } else if let Some(rest) = t.strip_prefix("0X") {
+            if let Some(hex) = hex6(rest) {
+                let _ = write!(s, "color:#{hex};");
+            }
+        } else if let Some(rest) = t.strip_prefix("F-") {
+            let (family, size) = if let Some(n) = rest.strip_prefix("BT") {
+                (Some(BATANG), n)
+            } else if let Some(n) = rest.strip_prefix("GL") {
+                (Some(GULIM), n)
+            } else {
+                (None, rest)
+            };
+            if let Some(f) = family {
+                let _ = write!(s, "font-family:{f};");
+            }
+            if let Ok(n) = size.parse::<u32>()
+                && (6..=48).contains(&n)
+            {
+                let _ = write!(s, "font-size:{n}pt;");
+            }
+        } else {
+            s.push_str(match t {
+                "B" => "font-weight:700;",
+                "!B" => "font-weight:400;",
+                "A-L" => "text-align:left;",
+                "A-C" => "text-align:center;",
+                "A-R" => "text-align:right;",
+                _ => "",
+            });
+        }
+    }
+    s
+}
+
+/// The node's own `USERMARK`, or else that of the `SPAN` or `P` holding most
+/// of its text, outside nested tables. Rendering uses one style per block or
+/// cell, so a minor inline run does not restyle the whole block.
+fn effective_mark(doc: &Doc, node: NodeId) -> Option<&str> {
+    fn walk<'d>(doc: &'d Doc, node: NodeId, best: &mut Option<(&'d str, usize)>) {
+        for &child in doc.tree.children(node) {
+            let tag = doc.tree.tag(child);
+            if tag == "TABLE" || is_scaffold(tag) {
+                continue;
+            }
+            match doc.attr(child, "USERMARK").filter(|m| !m.trim().is_empty()) {
+                Some(m) if tag == "SPAN" || tag == "P" => {
+                    let len = own_text(&doc.tree, child).chars().count();
+                    if best.is_none_or(|b| len > b.1) {
+                        *best = Some((m, len));
+                    }
+                }
+                _ => walk(doc, child, best),
+            }
+        }
+    }
+    if let Some(m) = doc.attr(node, "USERMARK").filter(|m| !m.trim().is_empty()) {
+        return Some(m);
+    }
+    let mut best = None;
+    walk(doc, node, &mut best);
+    let total = own_text(&doc.tree, node).chars().count();
+    best.filter(|&(_, len)| len * 2 > total).map(|(m, _)| m)
+}
+
+/// Block or cell style: its effective `USERMARK`, then explicit `ALIGN`/`VALIGN`.
+fn node_css(doc: &Doc, node: NodeId) -> String {
+    let mut style = effective_mark(doc, node).map(usermark_css).unwrap_or_default();
     if let Some(a) = doc.attr(node, "ALIGN") {
         let a = a.to_ascii_lowercase();
         if ["left", "right", "center", "justify"].contains(&a.as_str()) {
@@ -1267,16 +1355,15 @@ fn css_align(doc: &Doc, node: NodeId) -> String {
             let _ = write!(style, "vertical-align:{v};");
         }
     }
-    if doc
-        .attr(node, "USERMARK")
-        .is_some_and(|m| m.split_whitespace().any(|t| t == "B" || t.ends_with('B') && t.starts_with("F-")))
-    {
-        style.push_str("font-weight:bold;");
-    }
     style
 }
 
-/// Per-cell marks for one side of a table pair: class names keyed by 1-based (row, col).
+/// A positive pixel size attribute, bounded so a corrupt value cannot blow up the layout.
+fn px(doc: &Doc, node: NodeId, name: &str) -> Option<i64> {
+    doc.attr(node, name).and_then(crate::doc::attr_int).filter(|v| (1..=10_000).contains(v))
+}
+
+/// Per-cell marks for one side of a table pair, keyed by 1-based (row, col).
 struct CellMarks {
     class: HashMap<(usize, usize), &'static str>,
     pair: HashMap<(usize, usize), String>,
@@ -1317,28 +1404,24 @@ fn marks(item: &Item, index: usize, base_side: bool) -> CellMarks {
     m
 }
 
-/// Tables wider than this many DART pixels are fitted to their column.
-const FIT_WIDTH: i64 = 640;
-
-fn render_table(doc: &Doc, table: &Table, marks: Option<&CellMarks>) -> String {
+/// A table at DART's pixel sizes: declared column widths and row heights.
+/// The pane scrolls sideways for a table wider than it.
+fn render_table(doc: &Doc, table: &Table, marks: &CellMarks) -> String {
     let tree = &doc.tree;
     let mut out = String::new();
     let border = doc.attr(table.node, "BORDER").is_none_or(|b| b.trim() != "0");
-    let width: i64 = table.cols.iter().map(|&w| w.max(1)).sum::<i64>().max(1);
-    // Wide tables shrink to the column with their proportions kept; narrow ones keep DART's pixel widths.
-    let fit = width > FIT_WIDTH;
-    // Fitted tables shrink to at most 80% of their DART width, then scroll.
-    let table_width = if fit { format!("100%;min-width:{}px", width * 4 / 5) } else { format!("{width}px") };
-    let _ =
-        write!(out, "<table class=\"dsd{}\" style=\"width:{table_width}\"><colgroup>", if border { "" } else { " nb" });
-    for &w in &table.cols {
-        if fit {
-            let _ = write!(out, "<col style=\"width:{:.2}%\">", w.max(1) as f64 * 100.0 / width as f64);
-        } else {
-            let _ = write!(out, "<col style=\"width:{}px\">", w.max(1));
+    // Without COLGROUP widths the browser sizes the columns.
+    let sized = !table.cols.is_empty() && table.cols.iter().all(|&w| (1..=10_000).contains(&w));
+    let _ = write!(out, "<table class=\"dsd{}\"", if border { "" } else { " nb" });
+    if sized {
+        let _ = write!(out, " style=\"width:{}px\"><colgroup>", table.cols.iter().sum::<i64>());
+        for &w in &table.cols {
+            let _ = write!(out, "<col style=\"width:{w}px\">");
         }
+        out.push_str("</colgroup>");
+    } else {
+        out.push('>');
     }
-    out.push_str("</colgroup>");
     let mut by_row: Vec<Vec<&crate::doc::Cell>> = vec![Vec::new(); table.rows.len() + 1];
     for cell in &table.cells {
         if let Some(row) = by_row.get_mut(cell.row) {
@@ -1346,8 +1429,11 @@ fn render_table(doc: &Doc, table: &Table, marks: Option<&CellMarks>) -> String {
         }
     }
     for (r, row_cells) in by_row.iter().enumerate().skip(1) {
-        let rc = marks.and_then(|m| m.row_class.get(&r)).copied().unwrap_or("");
-        let _ = write!(out, "<tr class=\"{rc}\">");
+        let _ = write!(out, "<tr class=\"{}\"", marks.row_class.get(&r).copied().unwrap_or(""));
+        if let Some(h) = table.rows.get(r - 1).and_then(|&n| px(doc, n, "HEIGHT")) {
+            let _ = write!(out, " style=\"height:{h}px\"");
+        }
+        out.push('>');
         for &cell in row_cells {
             let node = cell.node;
             let tag = if tree.tag(node) == "TH" { "th" } else { "td" };
@@ -1359,18 +1445,16 @@ fn render_table(doc: &Doc, table: &Table, marks: Option<&CellMarks>) -> String {
             if cell.rowspan > 1 {
                 let _ = write!(attrs, " rowspan=\"{}\"", cell.rowspan);
             }
-            if let Some(m) = marks {
-                if let Some(c) = m.class.get(&key) {
-                    let _ = write!(attrs, " class=\"{c}\"");
-                }
-                if let Some(p) = m.pair.get(&key) {
-                    let _ = write!(attrs, " data-k=\"{p}\"");
-                }
-                if let Some(t) = m.title.get(&key) {
-                    let _ = write!(attrs, " title=\"{}\"", esc(t));
-                }
+            if let Some(c) = marks.class.get(&key) {
+                let _ = write!(attrs, " class=\"{c}\"");
             }
-            let mut style = css_align(doc, node);
+            if let Some(p) = marks.pair.get(&key) {
+                let _ = write!(attrs, " data-k=\"{p}\"");
+            }
+            if let Some(t) = marks.title.get(&key) {
+                let _ = write!(attrs, " title=\"{}\"", esc(t));
+            }
+            let mut style = node_css(doc, node);
             let text = own_text(tree, node);
             if parse_number(&text).is_some() {
                 style.push_str("white-space:nowrap;");
@@ -1414,172 +1498,285 @@ fn render_words(text: &str, counterpart: Option<&str>, base_side: bool) -> Strin
 }
 
 fn render_block(doc: &Doc, node: NodeId, item: &Item, base_side: bool) -> String {
-    let tree = &doc.tree;
-    let tag = tree.tag(node);
-    let class = match tag {
+    let class = match doc.tree.tag(node) {
         "TITLE" => "ttl",
         "COVER-TITLE" => "cttl",
         "WARNING" => "warn",
         _ => "p",
     };
-    let style = css_align(doc, node);
-    let text = own_text(tree, node);
+    let text = own_text(&doc.tree, node);
     let counterpart = item.text.as_ref().map(|t| if base_side { t.other.as_str() } else { t.base.as_str() });
-    format!("<div class=\"{class}\" style=\"{style}\">{}</div>", render_words(&text, counterpart, base_side))
+    format!(
+        "<div class=\"{class}\" style=\"{}\">{}</div>",
+        node_css(doc, node),
+        render_words(&text, counterpart, base_side)
+    )
 }
 
 fn render_side(doc: &Doc, node: Option<NodeId>, item: &Item, index: usize, base_side: bool) -> String {
-    let Some(node) = node else { return "<div class=\"empty\"></div>".to_owned() };
+    let Some(node) = node else { return String::new() };
     if let Some(t) = doc.table_for_node(node) {
-        let m = marks(item, index, base_side);
         let label = if item.moved { format!("T{} · moved", t.index) } else { format!("T{}", t.index) };
-        format!("<div class=\"loc\">{label}</div><div class=\"tw\">{}</div>", render_table(doc, t, Some(&m)))
+        format!("<div class=\"loc\">{label}</div>{}", render_table(doc, t, &marks(item, index, base_side)))
     } else {
         render_block(doc, node, item, base_side)
     }
 }
 
-fn changes_table(item: &Item) -> String {
-    if item.cells.is_empty() && item.rows.is_empty() && item.columns.is_empty() {
-        return String::new();
-    }
+/// The item's change list for the details panel, or `None` when it has nothing to list.
+fn change_list(item: &Item) -> Option<String> {
     let mut out = String::new();
-    let n = item.cells.len() + item.rows.len() + item.columns.len();
-    let _ = write!(
-        out,
-        "<details class=\"chg\"><summary>{n} change(s)</summary><table class=\"cl\"><tr><th>base</th><th>other</th><th>row</th><th>column</th><th>base value</th><th>other value</th><th>Δ</th></tr>"
-    );
-    for c in &item.columns {
-        let (b, o) =
-            (c.base.map(|v| format!("C{v}")).unwrap_or_default(), c.other.map(|v| format!("C{v}")).unwrap_or_default());
-        let what = if c.kind == RowKind::OnlyBase { "column only in base" } else { "column only in other" };
-        let _ = write!(
-            out,
-            "<tr class=\"st\"><td>{b}</td><td>{o}</td><td colspan=\"2\">{what}</td><td colspan=\"3\">{}</td></tr>",
-            esc(&c.header)
-        );
+    if let Some(t) = item.text.as_ref().filter(|t| !t.fragments.is_empty()) {
+        out.push_str("<table class=\"cl\"><tr><th>base wording</th><th>other wording</th></tr>");
+        for f in &t.fragments {
+            let _ = write!(
+                out,
+                "<tr><td><del>{}</del></td><td><ins>{}</ins></td></tr>",
+                esc_lines(&f.base),
+                esc_lines(&f.other)
+            );
+        }
+        out.push_str("</table>");
     }
-    for r in &item.rows {
-        let (b, o) =
-            (r.base.map(|v| format!("R{v}")).unwrap_or_default(), r.other.map(|v| format!("R{v}")).unwrap_or_default());
-        let what = match r.kind {
-            RowKind::OnlyBase => "row only in base",
-            RowKind::OnlyOther => "row only in other",
-            RowKind::Moved => "row moved",
-        };
-        let _ = write!(
-            out,
-            "<tr class=\"st\"><td>{b}</td><td>{o}</td><td colspan=\"2\">{what}</td><td colspan=\"3\">{}</td></tr>",
-            esc(&r.text)
-        );
+    if !(item.cells.is_empty() && item.rows.is_empty() && item.columns.is_empty()) {
+        out.push_str("<table class=\"cl\"><tr><th>base</th><th>other</th><th>row</th><th>column</th><th>base value</th><th>other value</th><th>Δ</th></tr>");
+        for c in &item.columns {
+            let (b, o) = (
+                c.base.map(|v| format!("C{v}")).unwrap_or_default(),
+                c.other.map(|v| format!("C{v}")).unwrap_or_default(),
+            );
+            let what = if c.kind == RowKind::OnlyBase { "column only in base" } else { "column only in other" };
+            let _ = write!(
+                out,
+                "<tr class=\"st\"><td>{b}</td><td>{o}</td><td colspan=\"2\">{what}</td><td colspan=\"3\">{}</td></tr>",
+                esc(&c.header)
+            );
+        }
+        for r in &item.rows {
+            let (b, o) = (
+                r.base.map(|v| format!("R{v}")).unwrap_or_default(),
+                r.other.map(|v| format!("R{v}")).unwrap_or_default(),
+            );
+            let what = match r.kind {
+                RowKind::OnlyBase => "row only in base",
+                RowKind::OnlyOther => "row only in other",
+                RowKind::Moved => "row moved",
+            };
+            let _ = write!(
+                out,
+                "<tr class=\"st\"><td>{b}</td><td>{o}</td><td colspan=\"2\">{what}</td><td colspan=\"3\">{}</td></tr>",
+                esc(&r.text)
+            );
+        }
+        for (k, c) in item.cells.iter().enumerate() {
+            let kind = match c.kind {
+                CellKind::Value => "v",
+                CellKind::Format => "f",
+                CellKind::Text => "t",
+            };
+            let _ = write!(
+                out,
+                "<tr class=\"{kind}\" data-c=\"{k}\"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"d\">{}</td></tr>",
+                c.base,
+                c.other,
+                esc(&c.row_label),
+                esc(&c.column),
+                esc_lines(&c.base_text),
+                esc_lines(&c.other_text),
+                esc(c.delta.as_deref().unwrap_or(""))
+            );
+        }
+        out.push_str("</table>");
     }
-    for c in &item.cells {
-        let kind = match c.kind {
-            CellKind::Value => "v",
-            CellKind::Format => "f",
-            CellKind::Text => "t",
-        };
-        let _ = write!(
-            out,
-            "<tr class=\"{kind}\"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"d\">{}</td></tr>",
-            c.base,
-            c.other,
-            esc(&c.row_label),
-            esc(&c.column),
-            esc_lines(&c.base_text),
-            esc_lines(&c.other_text),
-            esc(c.delta.as_deref().unwrap_or(""))
-        );
-    }
-    out.push_str("</table></details>");
-    out
+    (!out.is_empty()).then_some(out)
 }
 
 const STYLE: &str = r#"
-:root{--bg:#f4f5f7;--paper:#fff;--ink:#1d2129;--muted:#6b7280;--line:#c9ced6;--th:#e3e6ea;
---del:#ffd9d9;--del-ink:#9b1c1c;--ins:#d7f5dd;--ins-ink:#1e6b33;--mov:#fff1b8;--accent:#2f5fd0;}
+:root{--bg:#eceef1;--paper:#fff;--same:#f4f5f7;--ink:#1d2129;--muted:#6b7280;--line:#d3d7dd;--th:#e2e4e8;
+--del:#ffd5d8;--del-ink:#9b1c1c;--ins:#d3f2db;--ins-ink:#1e6b33;--mov:#fff1b8;--accent:#2f5fd0;
+--batang:Batang,'바탕',AppleMyungjo,serif;--gulim:Gulim,'굴림',AppleGothic,sans-serif}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.55 "Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",Gulim,sans-serif}
-header{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:1px solid var(--line);padding:8px 16px;display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center}
-header h1{font-size:15px;margin:0}
-.files{display:grid;grid-template-columns:1fr 1fr;gap:0 24px;flex:1 1 100%}
-.files div{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.files .b::before{content:"BASE  ";color:var(--del-ink);font-size:11px}
-.files .o::before{content:"OTHER  ";color:var(--ins-ink);font-size:11px}
+html,body{height:100%}
+body{margin:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);color:var(--ink);font:13px/1.5 "Malgun Gothic","맑은 고딕","Apple SD Gothic Neo",sans-serif}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;padding:6px 12px;background:var(--paper);border-bottom:1px solid var(--line)}
+.bar h1{font-size:15px;margin:0}
 .chips span{display:inline-block;margin-right:6px;padding:1px 8px;border-radius:10px;background:var(--bg);font-size:12px}
-.ctl button,.ctl label{font:inherit;margin-right:6px;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper);cursor:pointer}
-.ctl button:hover{border-color:var(--accent)}
-.wrap{display:grid;grid-template-columns:220px 1fr;min-height:calc(100vh - 80px)}
-nav{position:sticky;top:82px;align-self:start;max-height:calc(100vh - 90px);overflow:auto;padding:10px 8px;font-size:12px}
-nav a{display:flex;justify-content:space-between;gap:6px;padding:3px 8px;border-radius:5px;color:var(--ink);text-decoration:none}
-nav a:hover{background:var(--paper)}
-nav a b{font-weight:600;color:var(--accent)}
-nav a.clean b{color:var(--muted);font-weight:400}
-main{padding:12px 28px 80px 8px}
-h2.sec{font-size:14px;margin:22px 0 8px;padding:4px 10px;background:var(--paper);border-left:4px solid var(--accent)}
-.pair{display:grid;grid-template-columns:1fr 1fr;gap:0 14px;margin:0 0 6px;scroll-margin-top:120px}
-.side{background:var(--paper);border:1px solid transparent;padding:6px 10px;min-width:0;overflow-x:auto}
-.pair.same .side{opacity:.82}
-.pair.changed .side{border-color:#9ab3ef}
-.pair.onlyBase .side.b{background:var(--del);border-color:#f1a7a7}
-.pair.onlyOther .side.o{background:var(--ins);border-color:#9fd8aa}
-.pair.focus .side{box-shadow:0 0 0 2px var(--accent)}
-.empty{min-height:22px;background:repeating-linear-gradient(135deg,transparent 0 6px,#eceef1 6px 12px);height:100%}
-.loc{font-size:11px;color:var(--muted)}
-.p,.warn{white-space:pre-wrap;font-family:Batang,"바탕",serif;font-size:14px}
+.ctl{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.ctl button,.ctl label{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);cursor:pointer}
+.ctl button:hover,.ctl label:hover{border-color:var(--accent)}
+.ctl button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+#at{min-width:72px;text-align:center;font-variant-numeric:tabular-nums;color:var(--muted)}
+.main{flex:1;min-height:0;display:flex}
+#toc{flex:none;width:220px;overflow:auto;padding:8px 6px;border-right:1px solid var(--line);font-size:12px}
+body.notoc #toc{display:none}
+#toc a{display:flex;justify-content:space-between;gap:6px;padding:3px 8px;border-radius:5px;color:var(--ink);text-decoration:none;cursor:pointer}
+#toc a:hover{background:var(--paper)}
+#toc a b{font-weight:600;color:var(--accent)}
+#toc a.clean b{color:var(--muted);font-weight:400}
+body.only #toc a.clean{opacity:.45;pointer-events:none}
+.col{flex:1 1 0;min-width:0;display:flex;flex-direction:column;background:var(--paper)}
+.col+.col{border-left:1px solid var(--line)}
+.fname{flex:none;padding:6px 12px;border-bottom:1px solid var(--line);font:700 14px/1.4 var(--batang);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fname small{margin-right:8px;font:600 11px sans-serif}
+.col.b .fname small{color:var(--del-ink)}.col.o .fname small{color:var(--ins-ink)}
+.pane{flex:1;min-height:0;overflow:auto;position:relative}
+.blk{width:max-content;min-width:100%;padding:6px 16px;background:var(--paper)}
+.blk.same{background:var(--same)}
+.blk.changed{box-shadow:inset 3px 0 var(--accent)}
+.blk.onlyBase{background:#fff4f4;box-shadow:inset 3px 0 #e06a6a}
+.blk.onlyOther{background:#f1fbf3;box-shadow:inset 3px 0 #46a35e}
+.blk.void{background:repeating-linear-gradient(135deg,#f6f7f9 0 6px,#eceef1 6px 12px);box-shadow:none}
+.blk.sec{padding:14px 16px 4px;font-weight:700;font-size:14px;color:#1f4fbf;border-top:1px solid var(--line)}
+.blk.focus{outline:2px solid var(--accent);outline-offset:-2px}
+.loc{font:11px/1.4 sans-serif;color:var(--muted);margin-bottom:2px}
+.p,.ttl,.cttl,.warn{max-width:640px;white-space:pre-wrap;font-family:var(--batang);font-size:12pt;line-height:1.6}
+.ttl{font-weight:700;font-size:13pt}
+.cttl{font-weight:700;font-size:20pt;text-align:center;color:#1340a8}
 .warn{color:#8a5a00}
-.ttl{font-weight:700;font-size:15px;font-family:Batang,"바탕",serif}
-.cttl{font-weight:700;font-size:20px;text-align:center;color:#1340a8}
 del{background:var(--del);color:var(--del-ink);text-decoration:line-through}
 ins{background:var(--ins);color:var(--ins-ink);text-decoration:none}
-table.dsd{border-collapse:collapse;table-layout:fixed;font-size:12px;font-family:Gulim,"굴림",sans-serif;max-width:none}
-table.dsd td,table.dsd th{border:1px solid #8c939d;padding:2px 4px;overflow-wrap:anywhere;white-space:pre-wrap}
+table.dsd{border-collapse:collapse;table-layout:fixed;margin:2px 0 4px;font-family:var(--gulim);font-size:11pt;line-height:1.45}
+table.dsd td,table.dsd th{border:1px solid #7d848e;padding:2px 4px;white-space:pre-wrap;overflow-wrap:anywhere}
 table.dsd th{background:var(--th);font-weight:400}
 table.dsd.nb td,table.dsd.nb th{border-color:transparent}
-.tw{overflow-x:auto}
 td.chg-b,th.chg-b{background:var(--del)!important;color:var(--del-ink)}
 td.chg-o,th.chg-o{background:var(--ins)!important;color:var(--ins-ink)}
-td.hot,th.hot{outline:2px solid var(--accent);outline-offset:-2px}
-tr.row-only-b td,tr.row-only-b th{background:var(--del)}
-tr.row-only-o td,tr.row-only-o th{background:var(--ins)}
-tr.row-moved td,tr.row-moved th{background:var(--mov)}
-details.chg{grid-column:1/-1;margin:2px 0 4px;background:var(--paper);border:1px dashed var(--line);padding:2px 8px}
-details.chg summary{cursor:pointer;color:var(--accent);font-size:12px}
+td.hot,th.hot,tr.hot td{outline:2px solid var(--accent);outline-offset:-2px}
+tr.row-only-b td,tr.row-only-b th{background:var(--del)!important}
+tr.row-only-o td,tr.row-only-o th{background:var(--ins)!important}
+tr.row-moved td,tr.row-moved th{background:var(--mov)!important}
+.mapcol{flex:none;width:14px;display:flex;flex-direction:column;background:#e3e6ea;border-left:1px solid var(--line)}
+.mapcol .fname{padding:6px 0}
+#map{flex:1;position:relative;cursor:pointer}
+#map i{position:absolute;left:2px;right:2px;min-height:2px;border-radius:1px}
+#map i.changed{background:#5b84e6}#map i.onlyBase{background:#e06a6a}#map i.onlyOther{background:#46a35e}
+#map b{position:absolute;left:0;right:0;background:rgba(47,95,208,.12);border:1px solid rgba(47,95,208,.45);pointer-events:none}
+#info{display:none;flex:none;max-height:36vh;overflow:auto;padding:6px 14px 10px;background:var(--paper);border-top:2px solid var(--accent)}
+body.info #info{display:block}
+#info .ih{display:flex;gap:12px;align-items:baseline;margin-bottom:4px;font-size:12px;color:var(--muted)}
+#info .ih b{color:var(--ink);font-size:13px}
 table.cl{border-collapse:collapse;width:100%;margin:4px 0;font-size:12px}
 table.cl th,table.cl td{border-bottom:1px solid #e5e7eb;padding:2px 6px;text-align:left;vertical-align:top}
+table.cl tr[data-c]{cursor:pointer}
+table.cl tr[data-c]:hover td{background:#f3f6fd}
 table.cl td.d{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:600}
 table.cl tr.f td{color:var(--muted)}
 table.cl tr.st td{background:#fafbfc}
-body.only .pair.same,body.only h2.sec.clean{display:none}
-#map{position:fixed;right:4px;top:90px;bottom:10px;width:10px;background:#e7e9ed;border-radius:5px}
-#map i{position:absolute;left:0;width:10px;height:3px;border-radius:2px;cursor:pointer}
-#map i.changed{background:#5b84e6}#map i.onlyBase{background:#e06a6a}#map i.onlyOther{background:#46a35e}
-@media (max-width:900px){.wrap{grid-template-columns:1fr}nav{display:none}.pair{grid-template-columns:1fr}}
+body.only .blk.same,body.only .blk.sec.clean{display:none}
+@media (max-width:900px){.chips{display:none}.blk{padding:4px 8px}}
 "#;
 
 const SCRIPT: &str = r#"
 (function(){
-  var pairs=[].slice.call(document.querySelectorAll('.pair'));
-  var changed=pairs.filter(function(p){return !p.classList.contains('same')});
-  var at=-1, counter=document.getElementById('at');
-  function go(k){ if(!changed.length) return; at=(k+changed.length)%changed.length;
-    pairs.forEach(function(p){p.classList.remove('focus')});
-    var el=changed[at]; el.classList.add('focus'); el.scrollIntoView({block:'start'});
-    counter.textContent=(at+1)+' / '+changed.length; }
+  var body=document.body, pb=document.getElementById('pb'), po=document.getElementById('po');
+  var B=[].slice.call(pb.children), O=[].slice.call(po.children);
+  var map=document.getElementById('map'), info=document.getElementById('info'), counter=document.getElementById('at');
+  var changed=B.filter(function(b){return b.hasAttribute('data-i')&&!b.classList.contains('same')});
+  var at=-1, view=null;
+  if(window.innerWidth<900) body.classList.add('notoc');
+  // Each item is one block in each pane; both get the taller block's height.
+  function equalize(){
+    var i, h=[];
+    for(i=0;i<B.length;i++){B[i].style.height='';O[i].style.height=''}
+    for(i=0;i<B.length;i++) h.push(Math.max(B[i].offsetHeight,O[i].offsetHeight));
+    for(i=0;i<B.length;i++) if(h[i]){B[i].style.height=h[i]+'px';O[i].style.height=h[i]+'px'}
+    drawMap();
+  }
+  // A scroll in either pane moves the other. The position written to the other
+  // pane is remembered, so the echo it raises is recognized and not sent back;
+  // any other scroll there is the user's and moves this pane in turn.
+  function follow(src,dst){
+    src.addEventListener('scroll',function(){
+      var echo=src.echo; src.echo=null;
+      if(echo&&echo[0]===src.scrollTop&&echo[1]===src.scrollLeft){ showView(); return; }
+      if(dst.scrollTop!==src.scrollTop||dst.scrollLeft!==src.scrollLeft){
+        dst.scrollTop=src.scrollTop; dst.scrollLeft=src.scrollLeft;
+        // The other pane may clamp a position it cannot reach.
+        dst.echo=[dst.scrollTop,dst.scrollLeft];
+      }
+      showView();
+    },{passive:true});
+  }
+  follow(pb,po); follow(po,pb);
+  function scrollTo(el){ pb.scrollTop=Math.max(0,el.offsetTop-24); }
+  function details(el){
+    var i=el.getAttribute('data-i'), t=document.getElementById('d'+i);
+    info.innerHTML='';
+    if(t) info.appendChild(t.content.cloneNode(true));
+    else info.textContent=el.classList.contains('onlyBase')?'Only in the base document.':el.classList.contains('onlyOther')?'Only in the other document.':'No cell or wording changes to list for this item.';
+  }
+  function select(k,scroll){
+    if(!changed.length) return;
+    at=(k+changed.length)%changed.length;
+    [].forEach.call(document.querySelectorAll('.blk.focus'),function(x){x.classList.remove('focus')});
+    var el=changed[at], j=B.indexOf(el);
+    el.classList.add('focus'); O[j].classList.add('focus');
+    if(scroll) scrollTo(el);
+    counter.textContent=(at+1)+' / '+changed.length;
+    details(el);
+  }
+  function go(k){ select(k,true); }
   document.getElementById('next').onclick=function(){go(at+1)};
   document.getElementById('prev').onclick=function(){go(at-1)};
-  document.getElementById('only').onchange=function(e){document.body.classList.toggle('only',e.target.checked);map()};
-  document.addEventListener('keydown',function(e){ if(e.target.tagName==='INPUT') return;
-    if(e.key==='n'||e.key==='j') go(at+1); if(e.key==='p'||e.key==='k') go(at-1); });
-  document.addEventListener('mouseover',function(e){ var c=e.target.closest('[data-k]');
+  function toggle(button,cls,invert){
+    button.onclick=function(){ var on=body.classList.toggle(cls); button.setAttribute('aria-pressed',String(invert?!on:on)); equalize(); };
+    button.setAttribute('aria-pressed',String(invert?!body.classList.contains(cls):body.classList.contains(cls)));
+  }
+  toggle(document.getElementById('tocbtn'),'notoc',true);
+  toggle(document.getElementById('infobtn'),'info',false);
+  document.getElementById('only').onchange=function(e){ body.classList.toggle('only',e.target.checked); equalize(); };
+  [pb,po].forEach(function(pane){
+    var list=pane===pb?B:O;
+    pane.addEventListener('click',function(e){
+      var blk=e.target.closest('.blk'); if(!blk) return;
+      var k=changed.indexOf(B[list.indexOf(blk)]); if(k>=0) select(k,false);
+    });
+  });
+  // A change-list row outlines its cell pair in the panes.
+  info.addEventListener('click',function(e){
+    var row=e.target.closest('tr[data-c]'); if(!row||at<0) return;
+    var key='c'+changed[at].getAttribute('data-i')+'-'+row.getAttribute('data-c');
+    var cell=document.querySelector('#pb [data-k="'+key+'"]')||document.querySelector('#po [data-k="'+key+'"]');
+    hot(key);
+    if(cell){
+      var pane=cell.closest('.pane'), c=cell.getBoundingClientRect(), r=pane.getBoundingClientRect();
+      pane.scrollTop+=c.top-r.top-pane.clientHeight/3;
+      if(c.left<r.left||c.right>r.left+pane.clientWidth) pane.scrollLeft+=c.left-r.left-pane.clientWidth/3;
+    }
+  });
+  function hot(key){
     [].forEach.call(document.querySelectorAll('.hot'),function(x){x.classList.remove('hot')});
-    if(c) [].forEach.call(document.querySelectorAll('[data-k="'+c.getAttribute('data-k')+'"]'),function(x){x.classList.add('hot')}); });
-  function map(){ var m=document.getElementById('map'); m.innerHTML=''; var h=document.documentElement.scrollHeight;
-    changed.forEach(function(p){ if(!p.offsetParent) return; var i=document.createElement('i');
-      i.className=p.className.replace('pair','').trim().split(' ')[0]; i.style.top=(p.offsetTop/h*100)+'%';
-      i.onclick=function(){go(changed.indexOf(p))}; m.appendChild(i); }); }
-  window.addEventListener('load',map); window.addEventListener('resize',map);
-  counter.textContent=changed.length+' changes';
+    if(key) [].forEach.call(document.querySelectorAll('[data-k="'+key+'"]'),function(x){x.classList.add('hot')});
+  }
+  document.addEventListener('mouseover',function(e){ var c=e.target.closest('[data-k]'); if(c) hot(c.getAttribute('data-k')); });
+  [].forEach.call(document.querySelectorAll('#toc a'),function(a){
+    a.onclick=function(e){ e.preventDefault(); var el=pb.querySelector('[data-s="'+a.getAttribute('data-s')+'"]'); if(el&&el.offsetParent) scrollTo(el); };
+  });
+  document.addEventListener('keydown',function(e){
+    if(e.target.tagName==='INPUT'||e.ctrlKey||e.metaKey||e.altKey) return;
+    if(e.key==='n'||e.key==='j') go(at+1);
+    else if(e.key==='p'||e.key==='k') go(at-1);
+    else if(e.key==='i') document.getElementById('infobtn').click();
+  });
+  function drawMap(){
+    map.innerHTML=''; var H=pb.scrollHeight||1;
+    changed.forEach(function(el,k){
+      if(!el.offsetParent) return;
+      var m=document.createElement('i');
+      m.className=el.classList.contains('onlyBase')?'onlyBase':el.classList.contains('onlyOther')?'onlyOther':'changed';
+      m.style.top=(el.offsetTop/H*100)+'%'; m.style.height=(el.offsetHeight/H*100)+'%';
+      m.onclick=function(e){e.stopPropagation();go(k)};
+      map.appendChild(m);
+    });
+    view=document.createElement('b'); map.appendChild(view); showView();
+  }
+  function showView(){ if(!view) return; var H=pb.scrollHeight||1; view.style.top=(pb.scrollTop/H*100)+'%'; view.style.height=(pb.clientHeight/H*100)+'%'; }
+  map.onclick=function(e){ pb.scrollTop=e.offsetY/map.clientHeight*pb.scrollHeight-pb.clientHeight/2; };
+  var resized=0;
+  window.addEventListener('resize',function(){clearTimeout(resized);resized=setTimeout(equalize,150)});
+  counter.textContent=changed.length?changed.length+' changes':'no changes';
+  equalize();
+  if(document.fonts&&document.fonts.ready) document.fonts.ready.then(equalize);
 })();
 "#;
 
@@ -1592,79 +1789,93 @@ fn status_class(s: Status) -> &'static str {
     }
 }
 
-/// A self-contained side-by-side report: both documents rendered as DART
-/// tables and paragraphs, aligned item by item, with changed cells and words
-/// highlighted, a section index, and next/previous navigation. No external
-/// resources are loaded.
+/// A self-contained side-by-side report. Each document gets its own pane,
+/// rendered at DART's sizes; the panes scroll together with every item aligned,
+/// changed cells and words highlighted, a change map, a section index,
+/// next/previous navigation, and a panel listing the selected item's changes.
+/// No external resources are loaded.
 pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
-    let mut sections: Vec<(String, usize, usize)> = Vec::new();
+    let section_name = |s: &str| esc(if s.is_empty() { "(document start)" } else { s });
+    let mut sections: Vec<(String, usize)> = Vec::new();
     for item in &c.items {
         if sections.last().is_none_or(|s| s.0 != item.section) {
-            sections.push((item.section.clone(), 0, 0));
+            sections.push((item.section.clone(), 0));
         }
-        let last = sections.last_mut().expect("pushed");
-        last.1 += 1;
         if item.status != Status::Same {
-            last.2 += 1;
+            sections.last_mut().expect("pushed").1 += 1;
         }
     }
     let mut out = String::new();
     let s = &c.summary;
     let _ = write!(
         out,
-        "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>DSD 비교 — {} ↔ {}</title><style>{STYLE}</style></head><body>",
+        "<!doctype html><html lang=\"ko\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>DSD 비교 — {} ↔ {}</title><style>{STYLE}</style></head><body class=\"info\">",
         esc(&c.base.file),
         esc(&c.other.file)
     );
     let _ = write!(
         out,
-        "<header><h1>DSD 비교</h1><div class=\"chips\"><span>{} changed</span><span>{} only in base</span><span>{} only in other</span><span>{} value · {} text · {} format cells</span><span>{} rows</span></div>\
-<div class=\"ctl\"><button id=\"prev\" title=\"p / k\">◀ prev</button><button id=\"next\" title=\"n / j\">next ▶</button><span id=\"at\"></span> <label><input type=\"checkbox\" id=\"only\"> changes only</label></div>\
-<div class=\"files\"><div class=\"b\">{}</div><div class=\"o\">{}</div></div></header><div class=\"wrap\"><nav>",
-        s.changed,
-        s.only_base,
-        s.only_other,
-        s.value_changes,
-        s.text_cell_changes,
-        s.format_changes,
-        s.row_changes,
-        esc(&c.base.file),
-        esc(&c.other.file)
+        "<header class=\"bar\"><h1>DSD 비교</h1><div class=\"chips\"><span>{} changed</span><span>{} only in base</span><span>{} only in other</span><span>{} value · {} text · {} format cells</span><span>{} rows</span></div>\
+<div class=\"ctl\"><button id=\"prev\" title=\"p / k\">◀ prev</button><span id=\"at\"></span><button id=\"next\" title=\"n / j\">next ▶</button>\
+<label><input type=\"checkbox\" id=\"only\"> changes only</label><button id=\"tocbtn\">sections</button><button id=\"infobtn\" title=\"i\">details</button></div></header>\
+<div class=\"main\"><nav id=\"toc\">",
+        s.changed, s.only_base, s.only_other, s.value_changes, s.text_cell_changes, s.format_changes, s.row_changes,
     );
-    for (k, (name, _, changed)) in sections.iter().enumerate() {
+    for (k, (name, changed)) in sections.iter().enumerate() {
         let _ = write!(
             out,
-            "<a href=\"#s{k}\" class=\"{}\"><span>{}</span><b>{}</b></a>",
+            "<a href=\"#\" data-s=\"{k}\" class=\"{}\"><span>{}</span><b>{changed}</b></a>",
             if *changed == 0 { "clean" } else { "" },
-            esc(if name.is_empty() { "(document start)" } else { name }),
-            changed
+            section_name(name)
         );
     }
-    out.push_str("</nav><main>");
-    let mut current: Option<&str> = None;
-    let mut sec_index = 0;
-    for (index, item) in c.items.iter().enumerate() {
-        if current != Some(item.section.as_str()) {
-            let changed = sections.get(sec_index).map_or(0, |s| s.2);
+    out.push_str("</nav>");
+    for (base_side, id, side, file) in [(true, "pb", "b", &c.base.file), (false, "po", "o", &c.other.file)] {
+        let doc = if base_side { base } else { other };
+        let _ = write!(
+            out,
+            "<div class=\"col {side}\"><div class=\"fname\" title=\"{f}\"><small>{}</small>{f}</div><div class=\"pane\" id=\"{id}\">",
+            if base_side { "BASE" } else { "OTHER" },
+            f = esc(file)
+        );
+        let mut current: Option<&str> = None;
+        let mut sec_index = 0;
+        for (index, item) in c.items.iter().enumerate() {
+            if current != Some(item.section.as_str()) {
+                let clean = sections.get(sec_index).is_some_and(|s| s.1 == 0);
+                let _ = write!(
+                    out,
+                    "<div class=\"blk sec{}\" data-s=\"{sec_index}\">{}</div>",
+                    if clean { " clean" } else { "" },
+                    section_name(&item.section)
+                );
+                current = Some(item.section.as_str());
+                sec_index += 1;
+            }
+            let node = if base_side { item.base_node } else { item.other_node };
             let _ = write!(
                 out,
-                "<h2 class=\"sec{}\" id=\"s{sec_index}\">{}</h2>",
-                if changed == 0 { " clean" } else { "" },
-                esc(if item.section.is_empty() { "(document start)" } else { &item.section })
+                "<div class=\"blk {}{}\" data-i=\"{index}\">{}</div>",
+                status_class(item.status),
+                if node.is_none() { " void" } else { "" },
+                render_side(doc, node, item, index, base_side)
             );
-            current = Some(item.section.as_str());
-            sec_index += 1;
         }
-        let _ = write!(
-            out,
-            "<div class=\"pair {}\" id=\"i{index}\"><div class=\"side b\">{}</div><div class=\"side o\">{}</div>{}</div>",
-            status_class(item.status),
-            render_side(base, item.base_node, item, index, true),
-            render_side(other, item.other_node, item, index, false),
-            changes_table(item)
-        );
+        out.push_str("</div></div>");
     }
-    let _ = write!(out, "</main></div><div id=\"map\"></div><script>{SCRIPT}</script></body></html>");
+    out.push_str("<div class=\"mapcol\"><div class=\"fname\">&nbsp;</div><div id=\"map\" title=\"change map\"></div></div></div><section id=\"info\">Select a changed block, or press n, to list its changes here.</section>");
+    for (index, item) in c.items.iter().enumerate() {
+        if let Some(list) = change_list(item) {
+            let _ = write!(
+                out,
+                "<template id=\"d{index}\"><div class=\"ih\"><b>{}</b><span>{} ↔ {}</span></div>{list}</template>",
+                section_name(&item.section),
+                loc_label(item.base.as_ref()),
+                loc_label(item.other.as_ref())
+            );
+        }
+    }
+    let _ = write!(out, "<script>{SCRIPT}</script></body></html>");
     out.push('\n');
     out
 }
@@ -1707,6 +1918,19 @@ mod tests {
         let k = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         let p = pair_keys(&k(&["a", "현금및현금성자산", "c"]), &k(&["a", "현금및현금성자산(주1)", "x", "c"]));
         assert_eq!(p, vec![(Some(0), Some(0)), (Some(1), Some(1)), (None, Some(2)), (Some(2), Some(3))]);
+    }
+
+    #[test]
+    fn usermarks_become_validated_css() {
+        assert_eq!(
+            usermark_css("F-BT12  0X1A2B3C BC0XFFFFFF B A-R"),
+            format!(
+                "font-family:{BATANG};font-size:12pt;color:#1A2B3C;background-color:#FFFFFF;font-weight:700;text-align:right;"
+            )
+        );
+        assert_eq!(usermark_css("F-10 !B"), "font-size:10pt;font-weight:400;");
+        // Malformed values never reach the style attribute.
+        assert_eq!(usermark_css("0X12;}x BC0XGGGGGG F-999 F-1 Q"), "");
     }
 
     #[test]
