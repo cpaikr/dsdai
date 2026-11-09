@@ -1636,15 +1636,15 @@ body.only #toc a.clean{opacity:.45;pointer-events:none}
 del{background:var(--del);color:var(--del-ink);text-decoration:line-through}
 ins{background:var(--ins);color:var(--ins-ink);text-decoration:none}
 table.dsd{border-collapse:collapse;table-layout:fixed;margin:2px 0 4px;font-family:var(--gulim);font-size:11pt;line-height:1.45}
-table.dsd td,table.dsd th{border:1px solid #7d848e;padding:2px 4px;white-space:pre-wrap;overflow-wrap:anywhere;overflow:hidden}
+table.dsd td,table.dsd th{border:1px solid #7d848e;padding:2px 4px;white-space:pre-wrap;overflow-wrap:anywhere}
 table.dsd th{background:var(--th);font-weight:400}
 table.dsd.nb td,table.dsd.nb th{border-color:transparent}
 td.chg-b,th.chg-b{background:var(--del)!important;color:var(--del-ink)}
 td.chg-o,th.chg-o{background:var(--ins)!important;color:var(--ins-ink)}
 td.hot,th.hot,tr.hot td{outline:2px solid var(--accent);outline-offset:-2px}
-tr.row-only-b td,tr.row-only-b th{background:var(--del)}
-tr.row-only-o td,tr.row-only-o th{background:var(--ins)}
-tr.row-moved td,tr.row-moved th{background:var(--mov)}
+tr.row-only-b td,tr.row-only-b th{background:var(--del)!important}
+tr.row-only-o td,tr.row-only-o th{background:var(--ins)!important}
+tr.row-moved td,tr.row-moved th{background:var(--mov)!important}
 .mapcol{flex:none;width:14px;display:flex;flex-direction:column;background:#e3e6ea;border-left:1px solid var(--line)}
 .mapcol .fname{padding:6px 0}
 #map{flex:1;position:relative;cursor:pointer}
@@ -1750,7 +1750,7 @@ const SCRIPT: &str = r#"
   }
   document.addEventListener('mouseover',function(e){ var c=e.target.closest('[data-k]'); if(c) hot(c.getAttribute('data-k')); });
   [].forEach.call(document.querySelectorAll('#toc a'),function(a){
-    a.onclick=function(){ var el=pb.querySelector('[data-s="'+a.getAttribute('data-s')+'"]'); if(el&&el.offsetParent) scrollTo(el); };
+    a.onclick=function(e){ e.preventDefault(); var el=pb.querySelector('[data-s="'+a.getAttribute('data-s')+'"]'); if(el&&el.offsetParent) scrollTo(el); };
   });
   document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.ctrlKey||e.metaKey||e.altKey) return;
@@ -1824,7 +1824,7 @@ pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
     for (k, (name, changed)) in sections.iter().enumerate() {
         let _ = write!(
             out,
-            "<a data-s=\"{k}\" class=\"{}\"><span>{}</span><b>{changed}</b></a>",
+            "<a href=\"#\" data-s=\"{k}\" class=\"{}\"><span>{}</span><b>{changed}</b></a>",
             if *changed == 0 { "clean" } else { "" },
             section_name(name)
         );
