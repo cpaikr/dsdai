@@ -4,7 +4,7 @@ The `dsd` CLI is distributed as prebuilt archives on the public
 [GitHub Releases of cpaikr/dsdai](https://github.com/cpaikr/dsdai/releases).
 The [README](../README.md#installation) owns the consumer installation and
 update procedure; this runbook owns targets, certification, and release
-operations. The first release was v0.1.0; the latest is v0.1.1.
+operations. The first release was v0.1.0; the latest is v0.1.2.
 
 ## Targets and certification
 
@@ -83,7 +83,7 @@ itself through the Windows management service, records its process ancestry,
 and checks visibility, full-path execution, and `PATH` resolution:
 
 ```powershell
-.\scripts\verify-windows-install.ps1 -BinDirectory "$env:LOCALAPPDATA\dsd\bin" -ExpectedVersion 0.1.1
+.\scripts\verify-windows-install.ps1 -BinDirectory "$env:LOCALAPPDATA\dsd\bin" -ExpectedVersion 0.1.2
 ```
 
 [Windows installation and recovery](windows-installation.md) covers the
