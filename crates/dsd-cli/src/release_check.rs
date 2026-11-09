@@ -526,13 +526,42 @@ pub async fn fetch_bounded(
 
 async fn fetch_evidence(manifest_url: &str, now: DateTime<Utc>) -> Result<Evidence, String> {
     let client = http_client()?;
-    // GitHub answers 404 when no published release provides a manifest.
-    let Some(body) = fetch_bounded(&client, manifest_url, MAX_MANIFEST_BYTES, "release manifest").await? else {
+    let body = fetch_bounded(&client, manifest_url, MAX_MANIFEST_BYTES, "release manifest").await?;
+    evidence_from_manifest(body.as_deref(), now)
+}
+
+/// Evidence from a latest-release manifest body; `None` is GitHub's 404, which
+/// it answers when no published release provides a manifest.
+fn evidence_from_manifest(body: Option<&[u8]>, now: DateTime<Utc>) -> Result<Evidence, String> {
+    let Some(body) = body else {
         return Ok(Evidence { observed_at: now, latest: None });
     };
-    let manifest: Manifest = serde_json::from_slice(&body)
+    let manifest: Manifest = serde_json::from_slice(body)
         .map_err(|_| "The latest release manifest is not valid release-manifest JSON.".to_owned())?;
     Ok(Evidence { observed_at: now, latest: Some(assess_release(&manifest, TARGET)?) })
+}
+
+/// Caches the latest-release manifest that `dsd upgrade` fetched from
+/// [`LATEST_MANIFEST_PATH`], exactly as a refresh would, so the next check
+/// reports the release it saw without a request of its own. Otherwise evidence
+/// cached before an upgrade keeps comparing the new executable with an older
+/// release for up to a day.
+///
+/// Best effort and silent: the upgrade outcome does not depend on the cache,
+/// and the next check reports any cache problem itself. With release checks
+/// disabled it does no cache work, like every other check.
+pub fn record_latest_manifest(body: Option<&[u8]>) {
+    let settings = Settings::from_environment();
+    if settings.disabled.is_some() {
+        return;
+    }
+    let (Ok(directory), Ok(evidence)) =
+        (settings.cache_directory, evidence_from_manifest(body, Utc::now().trunc_subsecs(0)))
+    else {
+        return;
+    };
+    let record = CacheRecord { target: TARGET.map(str::to_owned), evidence: Some(evidence), last_failure_at: None };
+    let _ = save(&directory, &record);
 }
 
 /// The release a manifest describes, assessed for `target`.

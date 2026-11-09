@@ -36,7 +36,9 @@ Evidence problems are listed in releaseCheck.problems and still exit 0.
 
 Release evidence is fetched from github.com and GitHub's release asset host,
 cached for 24 hours, and a failed refresh is retried after 1 hour; a refresh
-takes at most 1.5 seconds. DSD_CACHE_DIR sets an absolute cache directory.
+takes at most 1.5 seconds. upgrade and upgrade --check replace the cached
+evidence with the release they fetch. DSD_CACHE_DIR sets an absolute cache
+directory.
 DSD_NO_UPDATE_CHECK=1 disables --check and incidental advisories, not upgrade.
 version never installs anything; see `dsd upgrade`.";
 
