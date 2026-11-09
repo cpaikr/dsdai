@@ -967,6 +967,8 @@ fn compare_aligns_by_content() {
     assert!(page.contains("제 4 기<ins>(재작성)</ins></th>"), "{page}");
     // A note-reference-only change is a format change, and its characters are marked too.
     assert!(page.contains("현금및현금성자산<ins>(주1)</ins></td>"), "{page}");
+    // The keyboard shortcuts are shown as keycaps on their buttons.
+    assert!(["<kbd>N</kbd>", "<kbd>P</kbd>", "<kbd>I</kbd>"].iter().all(|k| page.contains(k)));
     assert!(page.contains(">1,600,000</td>") && !page.contains("<ins>1,600,000</ins>"));
     // One pane per document, with one block per item in each, so the panes align.
     let pane = |id: &str| {

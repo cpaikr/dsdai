@@ -1672,6 +1672,8 @@ body{margin:0;display:flex;flex-direction:column;overflow:hidden;background:var(
 .ctl button,.ctl label{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);cursor:pointer}
 .ctl button:hover,.ctl label:hover{border-color:var(--accent)}
 .ctl button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+kbd{display:inline-block;min-width:1.5em;margin:0 1px;padding:0 4px;border:1px solid #b9bfc8;border-bottom-width:2px;border-radius:4px;background:#f6f7f9;color:var(--ink);font:600 11px/1.5 ui-monospace,Consolas,monospace;text-align:center;vertical-align:1px}
+.ctl button kbd{margin-left:6px}.ctl button kbd:first-child{margin:0 6px 0 0}
 #at{min-width:72px;text-align:center;font-variant-numeric:tabular-nums;color:var(--muted)}
 .main{flex:1;min-height:0;display:flex}
 #toc{flex:none;width:220px;overflow:auto;padding:8px 6px;border-right:1px solid var(--line);font-size:12px}
@@ -1886,8 +1888,8 @@ pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
     let _ = write!(
         out,
         "<header class=\"bar\"><h1>DSD 비교</h1><div class=\"chips\"><span>{} changed</span><span>{} only in base</span><span>{} only in other</span><span>{} value · {} text · {} format cells</span><span>{} rows</span></div>\
-<div class=\"ctl\"><button id=\"prev\" title=\"p / k\">◀ prev</button><span id=\"at\"></span><button id=\"next\" title=\"n / j\">next ▶</button>\
-<label><input type=\"checkbox\" id=\"only\"> changes only</label><button id=\"tocbtn\">sections</button><button id=\"infobtn\" title=\"i\">details</button></div></header>\
+<div class=\"ctl\"><button id=\"prev\" title=\"previous change (p or k)\"><kbd>P</kbd>◀ prev</button><span id=\"at\"></span><button id=\"next\" title=\"next change (n or j)\">next ▶<kbd>N</kbd></button>\
+<label><input type=\"checkbox\" id=\"only\"> changes only</label><button id=\"tocbtn\">sections</button><button id=\"infobtn\" title=\"show or hide the change list (i)\">details<kbd>I</kbd></button></div></header>\
 <div class=\"main\"><nav id=\"toc\">",
         s.changed, s.only_base, s.only_other, s.value_changes, s.text_cell_changes, s.format_changes, s.row_changes,
     );
@@ -1933,7 +1935,7 @@ pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
         }
         out.push_str("</div></div>");
     }
-    out.push_str("<div class=\"mapcol\"><div class=\"fname\">&nbsp;</div><div id=\"map\" title=\"change map\"></div></div></div><section id=\"info\">Select a changed block, or press n, to list its changes here.</section>");
+    out.push_str("<div class=\"mapcol\"><div class=\"fname\">&nbsp;</div><div id=\"map\" title=\"change map\"></div></div></div><section id=\"info\">Select a changed block, or press <kbd>N</kbd>, to list its changes here.</section>");
     for (index, item) in c.items.iter().enumerate() {
         if let Some(list) = change_list(item) {
             let _ = write!(
