@@ -1365,15 +1365,24 @@ fn px(doc: &Doc, node: NodeId, name: &str) -> Option<i64> {
 
 /// Per-cell marks for one side of a table pair, keyed by 1-based (row, col).
 struct CellMarks {
+    base_side: bool,
     class: HashMap<(usize, usize), &'static str>,
     pair: HashMap<(usize, usize), String>,
     title: HashMap<(usize, usize), String>,
+    /// The paired cell's text, for text changes whose characters get marked inside the cell.
+    counterpart: HashMap<(usize, usize), String>,
     row_class: HashMap<usize, &'static str>,
 }
 
 fn marks(item: &Item, index: usize, base_side: bool) -> CellMarks {
-    let mut m =
-        CellMarks { class: HashMap::new(), pair: HashMap::new(), title: HashMap::new(), row_class: HashMap::new() };
+    let mut m = CellMarks {
+        base_side,
+        class: HashMap::new(),
+        pair: HashMap::new(),
+        title: HashMap::new(),
+        counterpart: HashMap::new(),
+        row_class: HashMap::new(),
+    };
     let Some(al) = &item.alignment else { return m };
     for (k, &(b, o)) in al.changed.iter().enumerate() {
         let key = if base_side { b } else { o };
@@ -1385,6 +1394,13 @@ fn marks(item: &Item, index: usize, base_side: bool) -> CellMarks {
                 let _ = write!(t, "  (Δ {d})");
             }
             m.title.insert(key, t);
+            // Numbers keep the whole-cell mark and Δ: marking digits of two different
+            // amounts would scatter highlights that mean nothing. A non-numeric format
+            // change (only a note reference or company-name form differs) is marked.
+            let numeric = parse_number(&c.base_text).is_some() || parse_number(&c.other_text).is_some();
+            if c.kind == CellKind::Text || (c.kind == CellKind::Format && !numeric) {
+                m.counterpart.insert(key, if base_side { c.other_text.clone() } else { c.base_text.clone() });
+            }
         }
     }
     for &(i, j) in &al.rows {
@@ -1462,7 +1478,11 @@ fn render_table(doc: &Doc, table: &Table, marks: &CellMarks) -> String {
             if !style.is_empty() {
                 let _ = write!(attrs, " style=\"{style}\"");
             }
-            let _ = write!(out, "<{tag}{attrs}>{}</{tag}>", esc_lines(&text));
+            let body = match marks.counterpart.get(&key) {
+                Some(other) => render_words(&text, Some(other), marks.base_side),
+                None => esc_lines(&text),
+            };
+            let _ = write!(out, "<{tag}{attrs}>{body}</{tag}>");
         }
         out.push_str("</tr>");
     }
@@ -1470,27 +1490,74 @@ fn render_table(doc: &Doc, table: &Table, marks: &CellMarks) -> String {
     out
 }
 
-/// A text block with changed words marked: `<del>` on the base side, `<ins>` on the other.
+/// Replaced words that keep at least this share of the shorter side's characters are
+/// marked character by character ("재고" → "재고(주9)"); below it they are rewrites,
+/// and scattered character marks would only add noise.
+const CHAR_MARK_SHARE: f64 = 0.5;
+
+/// Character pairs (base × other length) a replaced run may cost to align; longer
+/// runs keep whole-word marks, since alignment is quadratic in the worst case.
+const CHAR_MARK_BUDGET: usize = 250_000;
+
+/// Characters of `words` (each word then its following space) to mark against `other`.
+fn char_flags(words: &[(String, String)], other: &[(String, String)]) -> Vec<bool> {
+    let flat = |ws: &[(String, String)]| ws.iter().flat_map(|(w, s)| w.chars().chain(s.chars())).collect::<Vec<_>>();
+    let (a, b) = (flat(words), flat(other));
+    if a.len().saturating_mul(b.len()) > CHAR_MARK_BUDGET {
+        return vec![true; a.len()];
+    }
+    let ops = Matcher::new(&a, &b).opcodes();
+    let kept: usize = ops.iter().filter(|o| o.0 == Tag::Equal).map(|o| o.2 - o.1).sum();
+    if (kept as f64) < CHAR_MARK_SHARE * a.len().min(b.len()).max(1) as f64 {
+        return vec![true; a.len()];
+    }
+    let mut flags = vec![false; a.len()];
+    for (tag, i1, i2, _, _) in ops {
+        if tag != Tag::Equal {
+            flags[i1..i2].fill(true);
+        }
+    }
+    flags
+}
+
+/// A text block with changed text marked: `<del>` on the base side, `<ins>` on the other.
+/// Words pair first; a replaced run of words is then narrowed to the characters that
+/// differ, since Korean attaches particles and note references without a space.
 fn render_words(text: &str, counterpart: Option<&str>, base_side: bool) -> String {
     let Some(other) = counterpart else { return esc_lines(text) };
     let (a, b) = (words(text), words(other));
     let (ka, kb): (Vec<&str>, Vec<&str>) =
         (a.iter().map(|w| w.0.as_str()).collect(), b.iter().map(|w| w.0.as_str()).collect());
-    let mut changed = vec![false; a.len()];
-    for (tag, i1, i2, _, _) in Matcher::new(&ka, &kb).opcodes() {
-        if tag != Tag::Equal {
-            for c in &mut changed[i1..i2] {
-                *c = true;
+    // One flag per character of each word of `a`, whitespace excluded.
+    let mut flags: Vec<Vec<bool>> = a.iter().map(|(w, _)| vec![false; w.chars().count()]).collect();
+    for (tag, i1, i2, j1, j2) in Matcher::new(&ka, &kb).opcodes() {
+        match tag {
+            Tag::Equal => {}
+            Tag::Replace => {
+                let mut run = char_flags(&a[i1..i2], &b[j1..j2]).into_iter();
+                for (k, (_, space)) in a[i1..i2].iter().enumerate() {
+                    for f in &mut flags[i1 + k] {
+                        *f = run.next().unwrap_or(true);
+                    }
+                    run.by_ref().take(space.chars().count()).for_each(drop);
+                }
             }
+            _ => flags[i1..i2].iter_mut().for_each(|f| f.fill(true)),
         }
     }
     let mark = if base_side { "del" } else { "ins" };
     let mut out = String::new();
-    for ((word, space), ch) in a.iter().zip(changed) {
-        if ch && !word.is_empty() {
-            let _ = write!(out, "<{mark}>{}</{mark}>", esc(word));
-        } else {
-            out.push_str(&esc(word));
+    for ((word, space), wf) in a.iter().zip(flags) {
+        let mut open = false;
+        for (ch, f) in word.chars().zip(wf) {
+            if f != open {
+                let _ = write!(out, "<{}{mark}>", if f { "" } else { "/" });
+                open = f;
+            }
+            out.push_str(&esc(ch.encode_utf8(&mut [0; 4])));
+        }
+        if open {
+            let _ = write!(out, "</{mark}>");
         }
         out.push_str(&esc_lines(space));
     }
@@ -1605,6 +1672,8 @@ body{margin:0;display:flex;flex-direction:column;overflow:hidden;background:var(
 .ctl button,.ctl label{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);cursor:pointer}
 .ctl button:hover,.ctl label:hover{border-color:var(--accent)}
 .ctl button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+kbd{display:inline-block;min-width:1.5em;margin:0 1px;padding:0 4px;border:1px solid #b9bfc8;border-bottom-width:2px;border-radius:4px;background:#f6f7f9;color:var(--ink);font:600 11px/1.5 ui-monospace,Consolas,monospace;text-align:center;vertical-align:1px}
+.ctl button kbd{margin-left:6px}.ctl button kbd:first-child{margin:0 6px 0 0}
 #at{min-width:72px;text-align:center;font-variant-numeric:tabular-nums;color:var(--muted)}
 .main{flex:1;min-height:0;display:flex}
 #toc{flex:none;width:220px;overflow:auto;padding:8px 6px;border-right:1px solid var(--line);font-size:12px}
@@ -1641,6 +1710,8 @@ table.dsd th{background:var(--th);font-weight:400}
 table.dsd.nb td,table.dsd.nb th{border-color:transparent}
 td.chg-b,th.chg-b{background:var(--del)!important;color:var(--del-ink)}
 td.chg-o,th.chg-o{background:var(--ins)!important;color:var(--ins-ink)}
+td.chg-b del,th.chg-b del{background:#f3a6a6;font-weight:700}
+td.chg-o ins,th.chg-o ins{background:#9edbab;font-weight:700}
 td.hot,th.hot,tr.hot td{outline:2px solid var(--accent);outline-offset:-2px}
 tr.row-only-b td,tr.row-only-b th{background:var(--del)!important}
 tr.row-only-o td,tr.row-only-o th{background:var(--ins)!important}
@@ -1791,8 +1862,9 @@ fn status_class(s: Status) -> &'static str {
 
 /// A self-contained side-by-side report. Each document gets its own pane,
 /// rendered at DART's sizes; the panes scroll together with every item aligned,
-/// changed cells and words highlighted, a change map, a section index,
-/// next/previous navigation, and a panel listing the selected item's changes.
+/// changed cells and, within text, the changed characters highlighted, a change
+/// map, a section index, next/previous navigation, and a panel listing the
+/// selected item's changes.
 /// No external resources are loaded.
 pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
     let section_name = |s: &str| esc(if s.is_empty() { "(document start)" } else { s });
@@ -1816,8 +1888,8 @@ pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
     let _ = write!(
         out,
         "<header class=\"bar\"><h1>DSD 비교</h1><div class=\"chips\"><span>{} changed</span><span>{} only in base</span><span>{} only in other</span><span>{} value · {} text · {} format cells</span><span>{} rows</span></div>\
-<div class=\"ctl\"><button id=\"prev\" title=\"p / k\">◀ prev</button><span id=\"at\"></span><button id=\"next\" title=\"n / j\">next ▶</button>\
-<label><input type=\"checkbox\" id=\"only\"> changes only</label><button id=\"tocbtn\">sections</button><button id=\"infobtn\" title=\"i\">details</button></div></header>\
+<div class=\"ctl\"><button id=\"prev\" title=\"previous change (p or k)\"><kbd>P</kbd>◀ prev</button><span id=\"at\"></span><button id=\"next\" title=\"next change (n or j)\">next ▶<kbd>N</kbd></button>\
+<label><input type=\"checkbox\" id=\"only\"> changes only</label><button id=\"tocbtn\">sections</button><button id=\"infobtn\" title=\"show or hide the change list (i)\">details<kbd>I</kbd></button></div></header>\
 <div class=\"main\"><nav id=\"toc\">",
         s.changed, s.only_base, s.only_other, s.value_changes, s.text_cell_changes, s.format_changes, s.row_changes,
     );
@@ -1863,7 +1935,7 @@ pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
         }
         out.push_str("</div></div>");
     }
-    out.push_str("<div class=\"mapcol\"><div class=\"fname\">&nbsp;</div><div id=\"map\" title=\"change map\"></div></div></div><section id=\"info\">Select a changed block, or press n, to list its changes here.</section>");
+    out.push_str("<div class=\"mapcol\"><div class=\"fname\">&nbsp;</div><div id=\"map\" title=\"change map\"></div></div></div><section id=\"info\">Select a changed block, or press <kbd>N</kbd>, to list its changes here.</section>");
     for (index, item) in c.items.iter().enumerate() {
         if let Some(list) = change_list(item) {
             let _ = write!(
@@ -1931,6 +2003,21 @@ mod tests {
         assert_eq!(usermark_css("F-10 !B"), "font-size:10pt;font-weight:400;");
         // Malformed values never reach the style attribute.
         assert_eq!(usermark_css("0X12;}x BC0XGGGGGG F-999 F-1 Q"), "");
+    }
+
+    #[test]
+    fn marks_narrow_to_changed_characters() {
+        // An appended note reference or a swapped syllable marks only those characters.
+        assert_eq!(render_words("가나재고(주9)", Some("가나재고"), false), "가나재고<ins>(주9)</ins>");
+        assert_eq!(render_words("갑동의 방침", Some("을동의 방침"), true), "<del>갑</del>동의 방침");
+        assert_eq!(render_words("제 4 기(재작성)", Some("제 4 기"), false), "제 4 기<ins>(재작성)</ins>");
+        // A rewrite marks whole words; inserted words are marked whole.
+        assert_eq!(render_words("가나다", Some("라마바"), true), "<del>가나다</del>");
+        assert_eq!(render_words("가 나 다", Some("가 다"), false), "가 <ins>나</ins> 다");
+        assert_eq!(render_words("a<b", Some("a<c"), false), "a&lt;<ins>b</ins>");
+        // A run too long to align within the budget keeps whole-word marks.
+        let long = "가".repeat(8000);
+        assert_eq!(render_words(&format!("{long}나"), Some(&long), false), format!("<ins>{long}나</ins>"));
     }
 
     #[test]

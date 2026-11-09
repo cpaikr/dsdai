@@ -110,9 +110,9 @@ delta = OTHER - BASE; \"format\" is the same number written differently.
 
 JSON and text list only items that differ unless --all; html renders each
 document in its own pane at DART's sizes, aligned item by item and scrolling
-together, with changed cells and words highlighted, a change map, a section
-index, next/previous navigation (n/p), a changes-only filter, and a panel
-listing the selected item's changes (i). The report is one self-contained file
+together, with changed cells and, within text, the changed characters
+highlighted, a change map, a section index, next/previous navigation (n/p), a
+changes-only filter, and a panel listing the selected item's changes (i). The report is one self-contained file
 with no external resources; it needs -o.";
 
 const STRUCTURE_AFTER: &str = "\
