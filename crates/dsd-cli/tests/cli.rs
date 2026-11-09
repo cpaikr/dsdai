@@ -928,6 +928,7 @@ fn compare_aligns_by_content() {
             {"op": "copy-row", "table": 3, "row": 4, "clear": true},
             {"op": "set-cell", "table": 3, "row": 5, "col": 1, "text": "   기타자산"},
             {"op": "set-cell", "table": 3, "row": 5, "col": 2, "text": "100,000"},
+            {"op": "set-cell", "table": 3, "row": 1, "col": 3, "text": "제 4 기(재작성)"},
             {"op": "delete-table", "table": 4},
             {"op": "replace", "old": "1. 일반사항", "new": "1. 일반사항 및 개요"},
         ])
@@ -960,6 +961,10 @@ fn compare_aligns_by_content() {
     assert_eq!(r["format"], "html");
     let page = std::fs::read_to_string(&html).unwrap();
     assert!(page.starts_with("<!doctype html>") && page.contains("class=\"chg-o\"") && page.contains("<ins>및</ins>"));
+    // A changed text cell keeps its cell mark and also marks the characters that differ;
+    // a changed number is marked as a whole cell only.
+    assert!(page.contains("제 4 기<ins>(재작성)</ins></th>"), "{page}");
+    assert!(page.contains(">1,600,000</td>") && !page.contains("<ins>1,600,000</ins>"));
     // One pane per document, with one block per item in each, so the panes align.
     let pane = |id: &str| {
         let start = page.find(&format!("id=\"{id}\"")).unwrap();

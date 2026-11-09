@@ -66,7 +66,8 @@ meaning, and tell the user which parts were unverified.
 - For a person, write the side-by-side report:
   `dsd compare BASE OTHER --format html -o compare.html`. It renders each
   document in its own pane at DART's sizes, aligned item by item and
-  scrolling together, highlights changed cells and words, and has a change
-  map, a section index, next/previous navigation, a changes-only filter, and
-  a panel listing the selected item's changes. It is one local file; keep it with the documents and
-  do not upload it. Summarize what matters from `--format text`.
+  scrolling together, highlights changed cells and, within text cells and
+  paragraphs, the characters that differ (amounts keep a whole-cell mark and
+  Δ), and has a change map, a section index, next/previous navigation, a
+  changes-only filter, and a panel listing the selected item's changes. It is
+  one local file; keep it with the documents and do not upload it. Summarize what matters from `--format text`.

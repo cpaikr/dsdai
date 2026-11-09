@@ -1365,15 +1365,24 @@ fn px(doc: &Doc, node: NodeId, name: &str) -> Option<i64> {
 
 /// Per-cell marks for one side of a table pair, keyed by 1-based (row, col).
 struct CellMarks {
+    base_side: bool,
     class: HashMap<(usize, usize), &'static str>,
     pair: HashMap<(usize, usize), String>,
     title: HashMap<(usize, usize), String>,
+    /// The paired cell's text, for text changes whose characters get marked inside the cell.
+    counterpart: HashMap<(usize, usize), String>,
     row_class: HashMap<usize, &'static str>,
 }
 
 fn marks(item: &Item, index: usize, base_side: bool) -> CellMarks {
-    let mut m =
-        CellMarks { class: HashMap::new(), pair: HashMap::new(), title: HashMap::new(), row_class: HashMap::new() };
+    let mut m = CellMarks {
+        base_side,
+        class: HashMap::new(),
+        pair: HashMap::new(),
+        title: HashMap::new(),
+        counterpart: HashMap::new(),
+        row_class: HashMap::new(),
+    };
     let Some(al) = &item.alignment else { return m };
     for (k, &(b, o)) in al.changed.iter().enumerate() {
         let key = if base_side { b } else { o };
@@ -1385,6 +1394,11 @@ fn marks(item: &Item, index: usize, base_side: bool) -> CellMarks {
                 let _ = write!(t, "  (Δ {d})");
             }
             m.title.insert(key, t);
+            // Numbers keep the whole-cell mark and Δ: marking digits of two different
+            // amounts would scatter highlights that mean nothing.
+            if c.kind == CellKind::Text {
+                m.counterpart.insert(key, if base_side { c.other_text.clone() } else { c.base_text.clone() });
+            }
         }
     }
     for &(i, j) in &al.rows {
@@ -1462,7 +1476,11 @@ fn render_table(doc: &Doc, table: &Table, marks: &CellMarks) -> String {
             if !style.is_empty() {
                 let _ = write!(attrs, " style=\"{style}\"");
             }
-            let _ = write!(out, "<{tag}{attrs}>{}</{tag}>", esc_lines(&text));
+            let body = match marks.counterpart.get(&key) {
+                Some(other) => render_words(&text, Some(other), marks.base_side),
+                None => esc_lines(&text),
+            };
+            let _ = write!(out, "<{tag}{attrs}>{body}</{tag}>");
         }
         out.push_str("</tr>");
     }
@@ -1470,27 +1488,68 @@ fn render_table(doc: &Doc, table: &Table, marks: &CellMarks) -> String {
     out
 }
 
-/// A text block with changed words marked: `<del>` on the base side, `<ins>` on the other.
+/// Replaced words that keep at least this share of the shorter side's characters are
+/// marked character by character ("재고" → "재고(주9)"); below it they are rewrites,
+/// and scattered character marks would only add noise.
+const CHAR_MARK_SHARE: f64 = 0.5;
+
+/// Characters of `words` (each word then its following space) to mark against `other`.
+fn char_flags(words: &[(String, String)], other: &[(String, String)]) -> Vec<bool> {
+    let flat = |ws: &[(String, String)]| ws.iter().flat_map(|(w, s)| w.chars().chain(s.chars())).collect::<Vec<_>>();
+    let (a, b) = (flat(words), flat(other));
+    let m = Matcher::new(&a, &b);
+    let kept: usize = m.matching_blocks().iter().map(|&(_, _, n)| n).sum();
+    let shorter = a.len().min(b.len()).max(1);
+    if (kept as f64) < CHAR_MARK_SHARE * shorter as f64 {
+        return vec![true; a.len()];
+    }
+    let mut flags = vec![false; a.len()];
+    for (tag, i1, i2, _, _) in m.opcodes() {
+        if tag != Tag::Equal {
+            flags[i1..i2].fill(true);
+        }
+    }
+    flags
+}
+
+/// A text block with changed text marked: `<del>` on the base side, `<ins>` on the other.
+/// Words pair first; a replaced run of words is then narrowed to the characters that
+/// differ, since Korean attaches particles and note references without a space.
 fn render_words(text: &str, counterpart: Option<&str>, base_side: bool) -> String {
     let Some(other) = counterpart else { return esc_lines(text) };
     let (a, b) = (words(text), words(other));
     let (ka, kb): (Vec<&str>, Vec<&str>) =
         (a.iter().map(|w| w.0.as_str()).collect(), b.iter().map(|w| w.0.as_str()).collect());
-    let mut changed = vec![false; a.len()];
-    for (tag, i1, i2, _, _) in Matcher::new(&ka, &kb).opcodes() {
-        if tag != Tag::Equal {
-            for c in &mut changed[i1..i2] {
-                *c = true;
+    // One flag per character of each word of `a`, whitespace excluded.
+    let mut flags: Vec<Vec<bool>> = a.iter().map(|(w, _)| vec![false; w.chars().count()]).collect();
+    for (tag, i1, i2, j1, j2) in Matcher::new(&ka, &kb).opcodes() {
+        match tag {
+            Tag::Equal => {}
+            Tag::Replace => {
+                let mut run = char_flags(&a[i1..i2], &b[j1..j2]).into_iter();
+                for (k, (_, space)) in a[i1..i2].iter().enumerate() {
+                    for f in &mut flags[i1 + k] {
+                        *f = run.next().unwrap_or(true);
+                    }
+                    run.by_ref().take(space.chars().count()).for_each(drop);
+                }
             }
+            _ => flags[i1..i2].iter_mut().for_each(|f| f.fill(true)),
         }
     }
     let mark = if base_side { "del" } else { "ins" };
     let mut out = String::new();
-    for ((word, space), ch) in a.iter().zip(changed) {
-        if ch && !word.is_empty() {
-            let _ = write!(out, "<{mark}>{}</{mark}>", esc(word));
-        } else {
-            out.push_str(&esc(word));
+    for ((word, space), wf) in a.iter().zip(flags) {
+        let mut open = false;
+        for (ch, f) in word.chars().zip(wf) {
+            if f != open {
+                let _ = write!(out, "<{}{mark}>", if f { "" } else { "/" });
+                open = f;
+            }
+            out.push_str(&esc(ch.encode_utf8(&mut [0; 4])));
+        }
+        if open {
+            let _ = write!(out, "</{mark}>");
         }
         out.push_str(&esc_lines(space));
     }
@@ -1641,6 +1700,8 @@ table.dsd th{background:var(--th);font-weight:400}
 table.dsd.nb td,table.dsd.nb th{border-color:transparent}
 td.chg-b,th.chg-b{background:var(--del)!important;color:var(--del-ink)}
 td.chg-o,th.chg-o{background:var(--ins)!important;color:var(--ins-ink)}
+td.chg-b del,th.chg-b del{background:#f3a6a6;font-weight:700}
+td.chg-o ins,th.chg-o ins{background:#9edbab;font-weight:700}
 td.hot,th.hot,tr.hot td{outline:2px solid var(--accent);outline-offset:-2px}
 tr.row-only-b td,tr.row-only-b th{background:var(--del)!important}
 tr.row-only-o td,tr.row-only-o th{background:var(--ins)!important}
@@ -1791,8 +1852,9 @@ fn status_class(s: Status) -> &'static str {
 
 /// A self-contained side-by-side report. Each document gets its own pane,
 /// rendered at DART's sizes; the panes scroll together with every item aligned,
-/// changed cells and words highlighted, a change map, a section index,
-/// next/previous navigation, and a panel listing the selected item's changes.
+/// changed cells and, within text, the changed characters highlighted, a change
+/// map, a section index, next/previous navigation, and a panel listing the
+/// selected item's changes.
 /// No external resources are loaded.
 pub fn render_html(c: &Comparison, base: &Doc, other: &Doc) -> String {
     let section_name = |s: &str| esc(if s.is_empty() { "(document start)" } else { s });
@@ -1931,6 +1993,18 @@ mod tests {
         assert_eq!(usermark_css("F-10 !B"), "font-size:10pt;font-weight:400;");
         // Malformed values never reach the style attribute.
         assert_eq!(usermark_css("0X12;}x BC0XGGGGGG F-999 F-1 Q"), "");
+    }
+
+    #[test]
+    fn marks_narrow_to_changed_characters() {
+        // An appended note reference or a swapped syllable marks only those characters.
+        assert_eq!(render_words("가나재고(주9)", Some("가나재고"), false), "가나재고<ins>(주9)</ins>");
+        assert_eq!(render_words("갑동의 방침", Some("을동의 방침"), true), "<del>갑</del>동의 방침");
+        assert_eq!(render_words("제 4 기(재작성)", Some("제 4 기"), false), "제 4 기<ins>(재작성)</ins>");
+        // A rewrite marks whole words; inserted words are marked whole.
+        assert_eq!(render_words("가나다", Some("라마바"), true), "<del>가나다</del>");
+        assert_eq!(render_words("가 나 다", Some("가 다"), false), "가 <ins>나</ins> 다");
+        assert_eq!(render_words("a<b", Some("a<c"), false), "a&lt;<ins>b</ins>");
     }
 
     #[test]
