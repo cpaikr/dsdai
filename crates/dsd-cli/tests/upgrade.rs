@@ -127,24 +127,48 @@ impl Fixture {
         self.routes.lock().unwrap().insert(LATEST_MANIFEST.to_owned(), manifest.to_string().into_bytes());
     }
 
-    fn upgrade(&self, args: &[&str], running: Option<&str>) -> Output {
+    /// The installed executable with release checks enabled against this
+    /// origin and a release-check cache private to this fixture.
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(self.executable());
         command
-            .arg("upgrade")
             .args(args)
             .env("DSD_FIXTURE_RELEASE_ORIGIN", &self.origin)
+            .env("DSD_CACHE_DIR", self.cache())
+            .env_remove("DSD_NO_UPDATE_CHECK")
             .env_remove("DSD_FIXTURE_RUNNING_VERSION")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        command
+    }
+
+    fn upgrade(&self, args: &[&str], running: Option<&str>) -> Output {
+        let mut command = self.command(&[&["upgrade"], args].concat());
         if let Some(running) = running {
             command.env("DSD_FIXTURE_RUNNING_VERSION", running);
         }
         run(&mut command)
     }
 
+    /// `result.releaseCheck` of `dsd version --check` run by the installed executable.
+    fn version_check(&self) -> Value {
+        let output = run(&mut self.command(&["version", "--check"]));
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        value["result"]["releaseCheck"].clone()
+    }
+
+    fn cache(&self) -> PathBuf {
+        self.directory.join("cache")
+    }
+
     fn archive_requests(&self) -> usize {
         self.requests.lock().unwrap().iter().filter(|path| path.ends_with(".tar.gz")).count()
+    }
+
+    fn manifest_requests(&self) -> usize {
+        self.requests.lock().unwrap().iter().filter(|path| *path == LATEST_MANIFEST).count()
     }
 
     fn receipt(&self) -> Value {
@@ -281,20 +305,47 @@ fn upgrade_replaces_a_managed_installation_and_its_receipt() {
 }
 
 #[test]
+fn upgrades_refresh_the_release_check_evidence() {
+    let fixture = Fixture::new();
+    fixture.install(Some(OLDER));
+    // Seed the cache as `version --check` did while an older release was latest.
+    let seed = || {
+        let _ = std::fs::remove_dir_all(fixture.cache());
+        fixture.publish(OLDER, &this_archive(), None);
+        let check = fixture.version_check();
+        assert_eq!((&check["comparison"], &check["latestVersion"]), (&json!("ahead"), &json!(OLDER)), "{check}");
+        fixture.publish(CURRENT, &this_archive(), None);
+    };
+    let assert_refreshed = |before: usize| {
+        let check = fixture.version_check();
+        assert_eq!(check["comparison"], "equal", "{check}");
+        assert_eq!((&check["latestVersion"], &check["freshness"]), (&json!(CURRENT), &json!("fresh")));
+        assert_eq!(fixture.manifest_requests(), before + 1, "only the upgrade fetched the manifest");
+    };
+
+    seed();
+    let before = fixture.manifest_requests();
+    assert!(fixture.upgrade(&["--check"], Some(OLDER)).status.success());
+    assert_refreshed(before);
+
+    seed();
+    let before = fixture.manifest_requests();
+    let upgraded = fixture.upgrade(&[], Some(OLDER));
+    assert_eq!(envelope(&upgraded)["result"]["updated"], true);
+    assert_refreshed(before);
+}
+
+#[test]
 fn the_release_check_opt_out_does_not_disable_an_explicit_upgrade_check() {
     let fixture = Fixture::new();
     fixture.install(Some(OLDER));
     fixture.publish(CURRENT, &this_archive(), None);
-    let mut command = Command::new(fixture.executable());
-    command
-        .args(["upgrade", "--check"])
-        .env("DSD_FIXTURE_RELEASE_ORIGIN", &fixture.origin)
-        .env("DSD_FIXTURE_RUNNING_VERSION", OLDER)
-        .env("DSD_NO_UPDATE_CHECK", "1")
-        .stdin(Stdio::null());
+    let mut command = fixture.command(&["upgrade", "--check"]);
+    command.env("DSD_FIXTURE_RUNNING_VERSION", OLDER).env("DSD_NO_UPDATE_CHECK", "1");
     let output = run(&mut command);
     assert!(output.status.success());
     assert_eq!(envelope(&output)["result"]["updateAvailable"], true);
+    assert!(!fixture.cache().exists(), "disabled release checks do no cache work");
 }
 
 #[test]

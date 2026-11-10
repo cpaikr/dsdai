@@ -123,10 +123,10 @@ impl Network<'_> {
 
     async fn latest_release(&self, target: &str) -> Result<Release, UpgradeError> {
         let url = format!("{}{}", self.origin, release_check::LATEST_MANIFEST_PATH);
-        let body = self
-            .fetch(&url, release_check::MAX_MANIFEST_BYTES, "release manifest", METADATA_TIMEOUT)
-            .await?
-            .ok_or_else(|| release_invalid("No published dsd release provides a release manifest."))?;
+        let body = self.fetch(&url, release_check::MAX_MANIFEST_BYTES, "release manifest", METADATA_TIMEOUT).await?;
+        // The release check owns the evidence cache; hand it what was fetched.
+        release_check::record_latest_manifest(body.as_deref());
+        let body = body.ok_or_else(|| release_invalid("No published dsd release provides a release manifest."))?;
         parse_release(&body, target)
     }
 

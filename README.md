@@ -207,9 +207,11 @@ and, when there is something to report, adds one entry to the JSON
 invalid invocations are never followed by a check. Release checks contact
 `github.com` and GitHub's release asset host, cache the evidence for 24 hours,
 and retry a failed refresh after 1 hour; a refresh adds at most 1.5 seconds to
-a command. The cache is disposable and lives in `%LOCALAPPDATA%\dsd\cache` on
-Windows, `~/Library/Caches/dsd` on macOS, and `$XDG_CACHE_HOME/dsd` or
-`~/.cache/dsd` on Linux; set `DSD_CACHE_DIR` to an absolute path to override
+a command. `upgrade` and `upgrade --check` replace the cached evidence with
+the release they fetch, so a following check needs no refresh. The cache is
+disposable and lives in `%LOCALAPPDATA%\dsd\cache` on Windows,
+`~/Library/Caches/dsd` on macOS, and `$XDG_CACHE_HOME/dsd` or `~/.cache/dsd`
+on Linux; set `DSD_CACHE_DIR` to an absolute path to override
 it. Set `DSD_NO_UPDATE_CHECK=1` to disable all release checks, including
 `version --check`; do so in sandboxes without network access or a writable
 cache, where every command would otherwise report `update_check_unavailable`.
