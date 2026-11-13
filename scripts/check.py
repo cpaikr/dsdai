@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from decimal import Decimal
 import os
 import re
 import subprocess
@@ -139,6 +140,206 @@ def source_text(path: Path) -> str:
     return squeeze(walk(root).replace("&cr;", ""))
 
 
+# ---------------------------------------------------------------------------
+# xlsx export: the workbook is read back with the standard library only.
+
+XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XL_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+BLOCK_TAGS = {"P", "TITLE", "COVER-TITLE", "IMG-CAPTION", "WARNING", "SUBTITLE", "IMG"}
+INDEX_SHEET = "총괄표"
+IMAGE_MARK = "[이미지] "
+NESTED_MARK = "[표]"
+UNMAPPED_LINE = re.compile(r"^\[T\d+\] \d+x\d+ table ")
+FIGURE = re.compile(
+    r"^(?P<open>[(△▲-])?\s*(?P<int>\d{1,3}(?:,\d{3})+|\d+)(?:\.(?P<frac>\d+))?(?P<pct>%)?\s*(?P<close>\))?$"
+)
+
+
+def cell_position(ref: str) -> tuple[int, int]:
+    """0-based (row, col) of an A1 reference, with or without `$`."""
+    m = re.match(r"\$?([A-Z]+)\$?(\d+)$", ref)
+    col = 0
+    for ch in m.group(1):
+        col = col * 26 + ord(ch) - 64
+    return int(m.group(2)) - 1, col - 1
+
+
+def read_workbook(path: Path) -> tuple[dict, dict]:
+    """Cells per sheet as {(row, col): ("s", text) | ("n", float)}, and each
+    defined name as (sheet, first cell, last cell)."""
+    with zipfile.ZipFile(path) as zf:
+        book = ET.fromstring(zf.read("xl/workbook.xml"))
+        rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))}
+        shared = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            for si in ET.fromstring(zf.read("xl/sharedStrings.xml")).iter(f"{XL}si"):
+                shared.append("".join(t.text or "" for t in si.iter(f"{XL}t")))
+        sheets = {}
+        for sheet in book.iter(f"{XL}sheet"):
+            target = rels[sheet.get(f"{XL_REL}id")].lstrip("/")
+            target = target if target.startswith("xl/") else "xl/" + target
+            cells = {}
+            for c in ET.fromstring(zf.read(target)).iter(f"{XL}c"):
+                v, kind, pos = c.find(f"{XL}v"), c.get("t"), cell_position(c.get("r"))
+                if kind == "s" and v is not None:
+                    cells[pos] = ("s", shared[int(v.text)])
+                elif kind == "inlineStr":
+                    cells[pos] = ("s", "".join(t.text or "" for t in c.iter(f"{XL}t")))
+                elif kind == "str" and v is not None:
+                    cells[pos] = ("s", v.text or "")
+                elif v is not None:
+                    cells[pos] = ("n", float(v.text))
+            sheets[sheet.get("name")] = cells
+        names = {}
+        for dn in book.iter(f"{XL}definedName"):
+            sheet, _, area = dn.text.lstrip("=").rpartition("!")
+            first, _, last = area.partition(":")
+            sheet = sheet[1:-1].replace("''", "'") if sheet.startswith("'") else sheet
+            names[dn.get("name")] = (sheet, cell_position(first), cell_position(last or first))
+    return sheets, names
+
+
+def figure(text: str):
+    """The number a table text should become, parsed independently of the CLI;
+    None when it must stay text."""
+    t = text.strip()
+    if t == "-":
+        return 0.0
+    m = FIGURE.match(t)
+    if not m or (m["open"] == "(") != bool(m["close"]):
+        return None
+    digits = m["int"].replace(",", "")
+    if m["int"].startswith("0") and ("," in m["int"] or len(digits) > 1):
+        return None
+    if len((digits + (m["frac"] or "")).lstrip("0")) > 15:
+        return None
+    value = Decimal(digits + ("." + m["frac"] if m["frac"] else ""))
+    if m["pct"]:
+        value /= 100
+    if m["open"]:
+        if value == 0:
+            return None
+        value = -value
+    return float(value)
+
+
+def source_lines(path: Path) -> Counter:
+    """Squeezed text lines outside tables, scaffolding, and the document
+    header, read independently with ElementTree."""
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("contents.xml"))
+    lines: Counter = Counter()
+    buf: list = []
+
+    def flush() -> None:
+        for line in "".join(buf).replace("\r", "").replace("\n", "").split("&cr;"):
+            if squeeze(line):
+                lines[squeeze(line)] += 1
+        buf.clear()
+
+    def walk(el: ET.Element) -> None:
+        if el.tag in SCAFFOLD or el.tag == "DOCUMENT-HEADER":
+            return
+        if el.tag == "TABLE":
+            flush()
+            return
+        block = el.tag in BLOCK_TAGS
+        if block:
+            flush()
+        buf.append(el.text or "")
+        for child in el:
+            walk(child)
+            buf.append(child.tail or "")
+        if block:
+            flush()
+
+    walk(root)
+    flush()
+    return lines
+
+
+def table_cell_ok(text: str, got) -> tuple[bool, bool]:
+    """Whether a workbook cell matches its `dsd table` text, and whether it
+    is a container cell showing a nested table as a placeholder."""
+    expect = figure(text)
+    if text == "":
+        return got is None or got == ("s", ""), False
+    if expect is not None:
+        return got == ("n", expect), False
+    if got and got[0] == "s" and got[1] != text and NESTED_MARK in got[1].split("\n"):
+        # `dsd table` flattens the nested table into the cell; the workbook
+        # places it on its own, so the container's own lines appear in order.
+        rest = iter(text.split("\n"))
+        own = [line for line in got[1].split("\n") if line != NESTED_MARK]
+        return all(any(line == r for r in rest) for line in own), True
+    return got == ("s", text), False
+
+
+def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
+    """Export twice (byte-identical), read the workbook back, and require
+    every table origin cell to match `dsd table` and every text line to be
+    present. Prints counts only."""
+    out, again = tmp / "a.xlsx", tmp / "b.xlsx"
+    envelope = dsd("xlsx", str(src), "-o", str(out))
+    if not envelope["ok"]:
+        fail(f"{label}: `xlsx` failed with {envelope['error']['code']}")
+        return
+    result = envelope["result"]
+    if not dsd("xlsx", str(src), "-o", str(again))["ok"] or out.read_bytes() != again.read_bytes():
+        fail(f"{label}: xlsx output is not byte-identical across runs")
+    sheets, names = read_workbook(out)
+    unmapped = sum(1 for w in envelope["warnings"] if w["code"] == "table-not-mapped")
+    count = dsd("read", str(src))["result"]["tables"]
+    numbers = [t["table"] for t in result["tables"]]
+    if len(numbers) + unmapped != count or numbers != sorted(set(numbers)):
+        fail(f"{label}: xlsx maps {len(numbers)} of {count} tables ({unmapped} reported unmapped)")
+    views = {t["index"]: t for t in dsd("table", str(src), *map(str, numbers))["result"]["tables"]} if numbers else {}
+    mismatches = containers = 0
+    claimed: dict = {}  # per sheet: table grid positions and markers, which are not text lines
+    for entry in result["tables"]:
+        n = entry["table"]
+        sheet, (top, left), (bottom, right) = names[f"DSD_T{n}"]
+        view = views[n]
+        if (sheet, bottom - top + 1, right - left + 1) != (entry["sheet"], view["rowCount"], view["colCount"]):
+            mismatches += 1
+        cells, mine = sheets[sheet], claimed.setdefault(sheet, set())
+        mine.add((top, left + view["colCount"]))
+        mine.update((top + r, left + c) for r in range(view["rowCount"]) for c in range(view["colCount"]))
+        for row in view["rows"]:
+            for cell in row["cells"]:
+                got = cells.get((top + row["row"] - 1, left + cell["col"] - 1))
+                if "text" not in cell:
+                    ok, nested = got is None or got == ("s", ""), False  # covered or missing: empty
+                else:
+                    ok, nested = table_cell_ok(cell["text"], got)
+                mismatches += not ok
+                containers += nested
+    shown: Counter = Counter()
+    for name, cells in sheets.items():
+        if name == INDEX_SHEET:
+            continue
+        for pos, (kind, value) in cells.items():
+            # Rows 1-2 hold the sheet title and the index link.
+            if pos[0] < 3 or pos in claimed.get(name, set()) or kind != "s" or UNMAPPED_LINE.match(value):
+                continue
+            value = value.removeprefix(IMAGE_MARK)
+            for line in value.split("\n"):
+                if squeeze(line):
+                    shown[squeeze(line)] += 1
+    expected = source_lines(src)
+    missing, extra = sum((expected - shown).values()), sum((shown - expected).values())
+    if mismatches:
+        fail(f"{label}: xlsx has {mismatches} table cell mismatch(es)")
+    if missing or extra:
+        fail(f"{label}: xlsx text lines differ ({missing} missing, {extra} extra)")
+    if not mismatches and not missing and not extra:
+        c = result["counts"]
+        print(
+            f"ok   {label}: xlsx {c['sheets']} sheets, {c['tables']} tables, {c['numberCells']} number and "
+            f"{c['textCells']} text cells, {sum(expected.values())} text lines, {containers} nested-table container(s)"
+        )
+
+
 def corpus_smoke() -> None:
     """Run the built CLI over the public fixture and any private samples.
 
@@ -181,6 +382,9 @@ def corpus_smoke() -> None:
                     fail(f"{label}: extract/pack round trip is not byte-identical")
                 else:
                     print(f"ok   {label}: check, complete read, outline, byte-identical round trip")
+            xlsx_dir = Path(tmp) / f"x{i}"
+            xlsx_dir.mkdir()
+            xlsx_smoke(label, src, xlsx_dir)
 
 
 def main() -> int:

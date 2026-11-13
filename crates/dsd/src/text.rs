@@ -22,7 +22,7 @@ fn layout_free(text: &str) -> String {
 ///
 /// Literal newlines in the XML are layout, not content, so they are dropped.
 pub fn node_text(tree: &Tree, node: NodeId, include_scaffold: bool) -> String {
-    text_of(tree, node, include_scaffold, true)
+    text_of(tree, node, include_scaffold, true, false)
 }
 
 /// Placeholder for a nested table in [`node_text_outside_tables`].
@@ -32,12 +32,36 @@ pub const NESTED_TABLE_MARK: &str = "[표]";
 /// replaced by [`NESTED_TABLE_MARK`] on its own line, so a nested table's
 /// cell boundaries are never flattened into the surrounding text.
 pub fn node_text_outside_tables(tree: &Tree, node: NodeId) -> String {
-    text_of(tree, node, false, false)
+    text_of(tree, node, false, false, false)
 }
 
-fn text_of(tree: &Tree, node: NodeId, include_scaffold: bool, nested_tables: bool) -> String {
-    const BOUNDARY: char = '\u{1e}';
+/// Like [`node_text_outside_tables`], but text inside SPAN and other
+/// non-block children joins the line as written: a `&cr;` or a space at the
+/// edge of a SPAN is kept instead of being trimmed with that child. The xlsx
+/// export uses it for text lines. (Cell text keeps [`node_text`]'s rule so it
+/// stays equal to what `table` reports.)
+pub fn block_text_outside_tables(tree: &Tree, node: NodeId) -> String {
+    text_of(tree, node, false, false, true)
+}
+
+const BOUNDARY: char = '\u{1e}';
+
+fn text_of(tree: &Tree, node: NodeId, include_scaffold: bool, nested_tables: bool, raw_inline: bool) -> String {
     let mut joined = String::new();
+    collect(tree, node, include_scaffold, nested_tables, raw_inline, &mut joined);
+    finish(&joined)
+}
+
+/// The node's content with block boundaries marked; non-block children are
+/// either collected in place (`raw_inline`) or trimmed on their own.
+fn collect(
+    tree: &Tree,
+    node: NodeId,
+    include_scaffold: bool,
+    nested_tables: bool,
+    raw_inline: bool,
+    joined: &mut String,
+) {
     for item in &tree.node(node).items {
         match item {
             Item::Text(t) => joined.push_str(&layout_free(t)),
@@ -52,14 +76,19 @@ fn text_of(tree: &Tree, node: NodeId, include_scaffold: bool, nested_tables: boo
                     joined.push(BOUNDARY);
                 } else if BLOCK_TEXT_TAGS.contains(&tag) {
                     joined.push(BOUNDARY);
-                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables));
+                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables, raw_inline));
                     joined.push(BOUNDARY);
+                } else if raw_inline {
+                    collect(tree, *child, include_scaffold, nested_tables, raw_inline, joined);
                 } else {
-                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables));
+                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables, raw_inline));
                 }
             }
         }
     }
+}
+
+fn finish(joined: &str) -> String {
     // Adjacent blocks are separated by one newline; &cr; runs keep their blank lines.
     let joined = joined.replace(CR_TOKEN, "\n");
     let text = joined

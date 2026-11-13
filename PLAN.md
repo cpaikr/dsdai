@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.6 done. Next action: step 1.7 |
+| Phase 1 | 1.1–1.7 done. Next action: step 1.8 |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -114,6 +114,29 @@ Recorded during implementation:
 - **CLI details (1.5).** `-o -` is refused with `invalid_argument` (a
   workbook never goes to stdout). `counts.numberCells`/`textCells` count
   table cells only. `sheets[].rows` is the last used row.
+- **Text lines keep SPAN edges (1.7).** The corpus check found paragraphs
+  whose line break is a `&cr;` alone in a SPAN. `node_text` trims each
+  non-block child on its own, so that break (and a trailing space inside a
+  SPAN) is lost and two lines join. Text lines now use
+  `block_text_outside_tables`, which collects SPAN content in place. Table
+  cells keep `node_text`'s rule so they stay equal to `dsd table`; the same
+  loss therefore remains in `table`, `find`, `diff`, and `compare` output,
+  left unchanged here because it alters existing commands (a follow-up).
+- **Corpus check (1.7).** Container cells of nested tables are compared by
+  their own lines in order, since `dsd table` flattens the nested table into
+  the cell. Text lines are compared as a multiset of whitespace-free lines
+  against an independent ElementTree extraction that skips the document
+  header, scaffolding, and tables. The check also requires byte-identical
+  reruns and that every table is mapped or reported unmapped.
+
+Open, for the owner (affects the sheet split):
+
+- Rule 3 applies inside a notes region too, so an appropriation statement
+  table (`이익잉여금처분계산서`) inside its note opens a statement sheet and
+  the rest of that note follows it until the next note heading. The
+  reference workbook keeps it on the note's sheet. Of the corpus, only the
+  working sample has this case. Keeping it on the note would be a one-line
+  rule: no statement sheets inside a notes region.
 
 ## What the reference workbook taught us
 
@@ -295,7 +318,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
   (built in the test with `replace_once`; `fixtures/public/sample/` stays as
   is): sheet names and order, cell values and types, merged ranges, defined
   names, byte-identical reruns, output guards, unverified-element warning.
-- [ ] **1.7 Corpus smoke** in `scripts/check.py`: export the public fixture
+- [x] **1.7 Corpus smoke** in `scripts/check.py`: export the public fixture
   and each private sample, read the xlsx back with the standard library only
   (`zipfile` + `ElementTree`), and require every origin cell of every table
   to match `dsd table` — text cells exactly, number cells by an independent

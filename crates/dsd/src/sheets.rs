@@ -16,8 +16,8 @@ use crate::compare::{next_note, note_heading};
 use crate::doc::{BLOCK_TEXT_TAGS, CR_TOKEN, Doc, Table, is_scaffold};
 use crate::error::{Error, Result};
 use crate::text::{
-    NESTED_TABLE_MARK, collapse, compact, is_py_space, node_text, node_text_outside_tables, unverified_schema,
-    unverified_tags,
+    NESTED_TABLE_MARK, block_text_outside_tables, collapse, compact, is_py_space, node_text, node_text_outside_tables,
+    unverified_schema, unverified_tags,
 };
 use crate::xml::{Item, NodeId};
 
@@ -434,7 +434,7 @@ impl Partition<'_> {
     }
 
     fn text_block(&mut self, node: NodeId, tag: &str) {
-        let text = node_text_outside_tables(&self.doc.tree, node);
+        let text = block_text_outside_tables(&self.doc.tree, node);
         let squeezed = compact(&text);
         if squeezed.is_empty() {
             return;
@@ -934,6 +934,13 @@ mod tests {
             ]
         );
         assert_eq!((wb.counts.number_cells, wb.counts.text_cells), (5, 2));
+    }
+
+    #[test]
+    fn line_breaks_and_spaces_at_span_edges_are_kept() {
+        let wb =
+            book("<P>기타사항 <SPAN>&amp;cr;</SPAN><SPAN>둘째 줄</SPAN></P><P><SPAN>가 </SPAN><SPAN>나</SPAN></P>");
+        assert_eq!(lines(&wb.sheets[1]), ["기타사항", "둘째 줄", "가 나"]);
     }
 
     #[test]
