@@ -17,8 +17,8 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.8 done; the sample workbook is in the owner's local sample folder. Next action: 1.9 (owner opens it in Excel and signs off) |
-| Phase 2 | Blocked on the Phase 1 gate |
+| Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
+| Phase 2 | Not started. Next action: step 2.1 (settle the open decisions with the owner) |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -335,7 +335,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
   ARCHITECTURE boundaries, a short export section in the skill's reading
   reference with routing from `SKILL.md`. Then `/code-review` and
   `/harmonize-docs changes`.
-- [ ] **1.9 Gate**: run the acceptance list below; the owner opens the
+- [x] **1.9 Gate**: run the acceptance list below; the owner opens the
   workbook for the working sample in Excel and signs off.
 
 ### Acceptance gate
