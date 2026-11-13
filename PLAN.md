@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.8 done; the sample workbook is in the owner's local sample folder. Next action: 1.9 (owner opens it in Excel and signs off) and the open rule below |
+| Phase 1 | 1.1–1.8 done; the sample workbook is in the owner's local sample folder. Next action: 1.9 (owner opens it in Excel and signs off) |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -135,17 +135,14 @@ Recorded during implementation:
   header, scaffolding, and tables. The check also requires byte-identical
   reruns and that every table is mapped or reported unmapped.
 
-Open, for the owner (affects the sheet split):
+Settled with the owner (2026-11-13):
 
-- Rule 3 applies inside a notes region too, so a statement-named table in
-  a note opens a statement sheet and the rest of that note follows it until
-  the next note heading. Cases: the appropriation statement
-  (`이익잉여금처분계산서`) inside the retained-earnings note (the working
-  sample has one; the reference workbook keeps it on the note's sheet) and
-  a summary table titled `요약재무상태표` in a subsidiary or associate note
-  (reproduced on a synthetic variant; not in the corpus). Keeping them on
-  the note would be a one-line rule: no statement sheets inside a notes
-  region.
+- **No statement sheets inside a notes region.** A statement-named table in
+  a note, such as the appropriation statement (`이익잉여금처분계산서`) in the
+  retained-earnings note or a `요약재무상태표` summary in a subsidiary or
+  associate note, stays on its note's sheet, as the reference workbook
+  does. Before this, rule 3 opened a statement sheet there and the rest of
+  the note followed it until the next note heading.
 
 ## What the reference workbook taught us
 
@@ -216,7 +213,8 @@ A new sheet starts at:
    with a known statement name (`재무상태표`, `손익계산서`, `자본변동표`,
    `현금흐름표`, `대차대조표`, `이익잉여금처분계산서`, `결손금처리계산서`). This
    covers `포괄손익계산서` and period/consolidation prefixes. The sheet runs to
-   the next statement title or the end of its region.
+   the next statement title or the end of its region. Not inside a notes
+   region (rule 4): there such a table stays on its note's sheet.
 4. **A note heading**, only inside a region whose title contains `주석`: a
    paragraph line that opens a numbered note, using the existing rule in
    `compare.rs` (`note_heading` + `next_note`: short, not a sentence, numbers

@@ -119,7 +119,7 @@ with no external resources; it needs -o.";
 const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
 sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
 first cell names one, such as 재무상태표), and inside a 주석 region one per note
-(주석1, 주석2, ...). Content outside every region goes to 본문. Sheet names are
+(주석1, 주석2, ...); a statement-named table inside a note stays on the note. Content outside every region goes to 본문. Sheet names are
 made valid and unique; result.sheets keeps each full title.
 
 Each sheet has its title in row 1 and a link back to 총괄표 in row 2; content

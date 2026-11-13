@@ -283,7 +283,8 @@ struct Part {
 }
 
 /// Where the walk is: inside COVER/TOC (no statement or note sheets), inside
-/// a notes region, and the last note number seen there.
+/// a notes region (note sheets, no statement sheets), and the last note
+/// number seen there.
 #[derive(Debug, Clone, Copy, Default)]
 struct Scope {
     plain: bool,
@@ -377,7 +378,10 @@ impl Partition<'_> {
             return;
         }
         if let Some(table) = doc.table_for_node(node) {
+            // Inside a notes region a statement-named table (an appropriation
+            // statement, a subsidiary's summary) belongs to its note.
             if !self.scope.plain
+                && !self.scope.notes
                 && let Some(title) = statement_title(&first_cell_text(doc, table))
                 && !self.repeats_statement_title(&title)
             {
@@ -986,6 +990,23 @@ mod tests {
         let wb =
             book("<P>기타사항 <SPAN>&amp;cr;</SPAN><SPAN>둘째 줄</SPAN></P><P><SPAN>가 </SPAN><SPAN>나</SPAN></P>");
         assert_eq!(lines(&wb.sheets[1]), ["기타사항", "둘째 줄", "가 나"]);
+    }
+
+    #[test]
+    fn statement_named_tables_in_a_note_stay_on_the_note() {
+        let wb = book(&section(
+            "SECTION-2",
+            "주석",
+            &format!(
+                "<P>20. 이익잉여금</P>{}{}<P>21. 관계기업</P>{}<P>뒷말</P>",
+                table("이익잉여금처분계산서", &[]),
+                table("과 목", &[]),
+                table("요약재무상태표", &[]),
+            ),
+        ));
+        assert_eq!(sheets(&wb).iter().map(|s| s.0).collect::<Vec<_>>(), ["주석", "주석20", "주석21"]);
+        assert_eq!(sheet(&wb, "주석20").tables, [1, 2]);
+        assert_eq!(lines(sheet(&wb, "주석21")), ["21. 관계기업", "요약재무상태표", "뒷말"]);
     }
 
     #[test]

@@ -37,18 +37,18 @@ editor guidance and unfilled insertions.
 
 `dsd xlsx FILE -o OUT.xlsx` writes a workbook for reading or footing. Sheet
 `총괄표` links every sheet; then come the cover and TOC, one sheet per titled
-section, one per statement (`재무상태표`, …), and inside a notes region one
-per note (`주석1`, …). Tables keep their grid with spans merged; a cell is a
-number only when Excel shows exactly its text (`(1,234)` and `△1,234` are
-negative, a lone `-` is zero), so note-number lists like `5,6,32` and
-footnoted amounts stay text. `result.tables` gives each table's sheet and
-range (also the defined name `DSD_T<n>`): cell `R#`/`C#` of a table is that
-many rows and columns from the range's first cell, so a figure found in the
-workbook maps back to `set-cell` coordinates. Images are named, not embedded.
-The workbook is output only: make corrections in the `.dsd` with the edit
-commands and export again. `warnings` report renamed sheets, tables that are
-unmapped or have grid problems (cells outside the grid are missing), and
-unverified content.
+section, one per statement (`재무상태표`, …), and inside a notes region one per
+note (`주석1`, …); a statement-named table inside a note stays there. Tables
+keep their grid with spans merged; a cell is a number only when Excel shows
+exactly its text (`(1,234)` and `△1,234` are negative, a lone `-` is zero), so
+note-number lists like `5,6,32` and footnoted amounts stay text.
+`result.tables` gives each table's sheet and range (also the defined name
+`DSD_T<n>`): cell `R#`/`C#` of a table is that many rows and columns from the
+range's first cell, so a figure found in the workbook maps back to `set-cell`
+coordinates. Images are named, not embedded. The workbook is output only: make
+corrections in the `.dsd` with the edit commands and export again. `warnings`
+report renamed sheets, tables that are unmapped or have grid problems (cells
+outside the grid are missing), and unverified content.
 
 ## Unverified content
 
