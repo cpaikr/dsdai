@@ -138,8 +138,10 @@ Recorded during implementation:
   - Statement-title detection reads the first cell without nested tables.
   - `result.tables` is in document order even when 본문 gathers content from
     both sides of a region.
-  - A row holding a multi-line single-row merge gets a height of 15 pt per
-    displayed line, since Excel does not fit merged cells. Lines are counted
+  - A multi-line merged cell gets the height its lines need, shared evenly
+    by the rows it spans, since Excel does not fit merged cells; a share no
+    taller than the default 15 pt row is left to Excel. A line is 17 pt
+    (Hangul falls back to a taller font than Calibri), and lines are counted
     after estimated wrapping at the merged width (15 px per wide glyph, 8 px
     otherwise); the estimate errs tall.
   - Text lines mark a nested table with a sentinel that XML cannot contain,

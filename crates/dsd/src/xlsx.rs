@@ -4,7 +4,7 @@
 //! this module only maps roles to styles. No file I/O, and no clock: the
 //! document creation time is pinned so the same model yields the same bytes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rust_xlsxwriter::{
     Color, DocProperties, ExcelDateTime, Format, FormatAlign, FormatBorder, Url, Workbook as Book, Worksheet, XlsxError,
@@ -15,8 +15,11 @@ use crate::error::{Error, Result};
 use crate::sheets::{Cell, Role, Sheet, Value, Workbook, workbook};
 
 const HEADER_FILL: u32 = 0x00D9_D9D9;
-/// Excel's default row height for the default 11 pt font.
-const LINE_HEIGHT_PT: f64 = 15.0;
+/// One line of the default 11 pt font. Calibri needs 15 pt, but Hangul falls
+/// back to a font that needs about 17, so lines are sized for Hangul.
+const LINE_HEIGHT_PT: f64 = 17.0;
+/// Excel's default row height; a row is never set lower.
+const DEFAULT_ROW_PT: f64 = 15.0;
 /// Excel's default column width, and glyph width estimates for the default
 /// 11 pt font: Hangul and other wide characters, and everything else.
 const DEFAULT_COL_PX: u16 = 64;
@@ -73,32 +76,36 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
         let format = origin.map_or_else(Format::new, |c| format_of(c, None));
         ws.merge_range(m.first_row, m.first_col, m.last_row, m.last_col, "", &format)?;
     }
-    // Excel fits row heights to wrapped text, but not inside a merged range: give
-    // a row that holds a multi-line merge the height of its tallest wrapped cell,
-    // estimating how its lines also wrap at the merged width.
+    // Excel fits row heights to wrapped text, but not inside a merged range. A
+    // multi-line merge gets the height its lines need (estimating how they also
+    // wrap at the merged width), shared evenly by the rows it spans; once a row
+    // has a height, its unmerged wrapped cells count too.
     let width = |first: u16, last: u16| {
         (first..=last).map(|c| u32::from(sheet.widths.get(&c).copied().unwrap_or(DEFAULT_COL_PX))).sum::<u32>()
     };
-    let mut heights: BTreeMap<u32, usize> = BTreeMap::new();
-    for m in sheet.merges.iter().filter(|m| m.first_row == m.last_row) {
+    let mut heights: BTreeMap<u32, f64> = BTreeMap::new();
+    for m in &sheet.merges {
         if let Some(c) = at.get(&(m.first_row, m.first_col)).filter(|c| c.wrap) {
-            heights.insert(m.first_row, line_count(c, width(m.first_col, m.last_col)));
+            let total = LINE_HEIGHT_PT * line_count(c, width(m.first_col, m.last_col)) as f64;
+            let share = quarter_points(total / f64::from(m.last_row - m.first_row + 1));
+            // Rows at their default height already fit a share no taller than it.
+            if share <= DEFAULT_ROW_PT {
+                continue;
+            }
+            for row in m.first_row..=m.last_row {
+                let h = heights.entry(row).or_insert(0.0);
+                *h = h.max(share);
+            }
         }
     }
-    let spans: HashMap<(u32, u16), u16> = sheet
-        .merges
-        .iter()
-        .filter(|m| m.first_row == m.last_row)
-        .map(|m| ((m.first_row, m.first_col), m.last_col))
-        .collect();
-    for c in sheet.cells.iter().filter(|c| c.wrap) {
+    let origins: HashSet<(u32, u16)> = sheet.merges.iter().map(|m| (m.first_row, m.first_col)).collect();
+    for c in sheet.cells.iter().filter(|c| c.wrap && !origins.contains(&(c.row, c.col))) {
         if let Some(h) = heights.get_mut(&c.row) {
-            let last = spans.get(&(c.row, c.col)).copied().unwrap_or(c.col);
-            *h = (*h).max(line_count(c, width(c.col, last)));
+            *h = h.max(LINE_HEIGHT_PT * line_count(c, width(c.col, c.col)) as f64);
         }
     }
-    for (&row, &lines) in &heights {
-        ws.set_row_height(row, LINE_HEIGHT_PT * lines as f64)?;
+    for (&row, &height) in &heights {
+        ws.set_row_height(row, height)?;
     }
     for cell in &sheet.cells {
         match &cell.value {
@@ -118,6 +125,11 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
         }
     }
     Ok(())
+}
+
+/// A height rounded up to a quarter point.
+fn quarter_points(pt: f64) -> f64 {
+    (pt * 4.0).ceil() / 4.0
 }
 
 /// Displayed lines of a wrapped cell `width_px` wide: its own lines, each
@@ -221,8 +233,30 @@ mod tests {
         let (model, bytes) = export(&doc(body)).unwrap();
         let row = model.placements[0].row + 1;
         let sheet = member(&bytes, "xl/worksheets/sheet2.xml");
-        assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"45\" customHeight=\"1\">")), "{sheet}");
+        assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"51\" customHeight=\"1\">")), "{sheet}");
         assert!(!sheet.contains(&format!("<row r=\"{}\" spans=\"1:2\" ht=", row + 1)), "unmerged rows autofit");
+    }
+
+    #[test]
+    fn a_multi_line_cell_spanning_rows_shares_its_height() {
+        let body = "<SECTION-1><TITLE>세로</TITLE><TABLE><COLGROUP><COL/><COL/></COLGROUP><TBODY><TR><TD ROWSPAN=\"2\">가&amp;cr;나&amp;cr;다</TD><TD>a</TD></TR><TR><TD>b</TD></TR></TBODY></TABLE></SECTION-1>";
+        let (model, bytes) = export(&doc(body)).unwrap();
+        let row = model.placements[0].row + 1;
+        let sheet = member(&bytes, "xl/worksheets/sheet2.xml");
+        for r in [row, row + 1] {
+            assert!(
+                sheet.contains(&format!("<row r=\"{r}\" spans=\"1:3\" ht=\"25.5\" customHeight=\"1\">"))
+                    || sheet.contains(&format!("<row r=\"{r}\" spans=\"1:2\" ht=\"25.5\" customHeight=\"1\">")),
+                "{sheet}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_short_cell_spanning_many_rows_leaves_their_heights_alone() {
+        let body = "<SECTION-1><TITLE>짧음</TITLE><TABLE><COLGROUP><COL/><COL/></COLGROUP><TBODY><TR><TD ROWSPAN=\"4\">가&amp;cr;나</TD><TD>a</TD></TR><TR><TD>b</TD></TR><TR><TD>c</TD></TR><TR><TD>d</TD></TR></TBODY></TABLE></SECTION-1>";
+        let (_, bytes) = export(&doc(body)).unwrap();
+        assert!(!member(&bytes, "xl/worksheets/sheet2.xml").contains("customHeight"));
     }
 
     #[test]
@@ -235,6 +269,7 @@ mod tests {
         let (model, bytes) = export(&doc(&body)).unwrap();
         let row = model.placements[0].row + 1;
         let sheet = member(&bytes, "xl/worksheets/sheet2.xml");
-        assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"75\" customHeight=\"1\">")), "{sheet}");
+        // 85 pt, which the writer rounds to whole pixels.
+        assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"84.75\" customHeight=\"1\">")), "{sheet}");
     }
 }
