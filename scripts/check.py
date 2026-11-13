@@ -151,8 +151,10 @@ IMAGE_MARK = "[이미지] "
 NESTED_MARK = "[표]"
 UNMAPPED_LINE = re.compile(r"^\[T\d+\] \d+x\d+ table ")
 FIGURE = re.compile(
-    r"^(?P<open>[(△▲-])?\s*(?P<int>\d{1,3}(?:,\d{3})+|\d+)(?:\.(?P<frac>\d+))?(?P<pct>%)?\s*(?P<close>\))?$"
+    r"^(?P<open>[(△▲-])?\s*(?P<int>[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.(?P<frac>[0-9]+))?(?P<pct>%)?\s*(?P<close>\))?$"
 )
+# Excel's built-in number formats the writer refers to by id instead of by code.
+BUILTIN_FORMATS = {0: "General", 1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%"}
 
 
 def cell_position(ref: str) -> tuple[int, int]:
@@ -165,10 +167,15 @@ def cell_position(ref: str) -> tuple[int, int]:
 
 
 def read_workbook(path: Path) -> tuple[dict, dict]:
-    """Cells per sheet as {(row, col): ("s", text) | ("n", float)}, and each
-    defined name as (sheet, first cell, last cell)."""
+    """Cells per sheet as {(row, col): ("s", text) | ("n", float, number format)},
+    and each defined name as (sheet, first cell, last cell)."""
     with zipfile.ZipFile(path) as zf:
         book = ET.fromstring(zf.read("xl/workbook.xml"))
+        styles = ET.fromstring(zf.read("xl/styles.xml"))
+        codes = dict(BUILTIN_FORMATS)
+        codes.update({int(f.get("numFmtId")): f.get("formatCode") for f in styles.iter(f"{XL}numFmt")})
+        xfs = styles.find(f"{XL}cellXfs")
+        cell_formats = [codes.get(int(xf.get("numFmtId", "0")), "?") for xf in xfs.iter(f"{XL}xf")]
         rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))}
         shared = []
         if "xl/sharedStrings.xml" in zf.namelist():
@@ -188,7 +195,7 @@ def read_workbook(path: Path) -> tuple[dict, dict]:
                 elif kind == "str" and v is not None:
                     cells[pos] = ("s", v.text or "")
                 elif v is not None:
-                    cells[pos] = ("n", float(v.text))
+                    cells[pos] = ("n", float(v.text), cell_formats[int(c.get("s", "0"))])
             sheets[sheet.get("name")] = cells
         names = {}
         for dn in book.iter(f"{XL}definedName"):
@@ -200,11 +207,11 @@ def read_workbook(path: Path) -> tuple[dict, dict]:
 
 
 def figure(text: str):
-    """The number a table text should become, parsed independently of the CLI;
-    None when it must stay text."""
+    """The number and number format a table text should become, derived
+    independently of the CLI; None when it must stay text."""
     t = text.strip()
     if t == "-":
-        return 0.0
+        return 0.0, '#,##0;-#,##0;"-"'
     m = FIGURE.match(t)
     if not m or (m["open"] == "(") != bool(m["close"]):
         return None
@@ -216,11 +223,13 @@ def figure(text: str):
     value = Decimal(digits + ("." + m["frac"] if m["frac"] else ""))
     if m["pct"]:
         value /= 100
+    fmt = ("#,##0" if "," in m["int"] else "0") + ("." + "0" * len(m["frac"]) if m["frac"] else "") + (m["pct"] or "")
     if m["open"]:
         if value == 0:
             return None
         value = -value
-    return float(value)
+        fmt += {"(": f";({fmt})", "-": f";-{fmt}"}.get(m["open"], f';"{m["open"]}"{fmt}')
+    return float(value), fmt
 
 
 def source_lines(path: Path) -> Counter:
@@ -265,7 +274,7 @@ def table_cell_ok(text: str, got) -> tuple[bool, bool]:
     if text == "":
         return got is None or got == ("s", ""), False
     if expect is not None:
-        return got == ("n", expect), False
+        return got == ("n", *expect), False
     if got and got[0] == "s" and got[1] != text and NESTED_MARK in got[1].split("\n"):
         # `dsd table` flattens the nested table into the cell; the workbook
         # places it on its own, so the container's own lines appear in order.
@@ -318,13 +327,14 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
     for name, cells in sheets.items():
         if name == INDEX_SHEET:
             continue
-        for pos, (kind, value) in cells.items():
+        for pos, (kind, value, *_) in cells.items():
             # Rows 1-2 hold the sheet title and the index link.
             if pos[0] < 3 or pos in claimed.get(name, set()) or kind != "s" or UNMAPPED_LINE.match(value):
                 continue
             value = value.removeprefix(IMAGE_MARK)
             for line in value.split("\n"):
-                if squeeze(line):
+                # A paragraph's nested table is placed on its own; its placeholder is not source text.
+                if squeeze(line) and line != NESTED_MARK:
                     shown[squeeze(line)] += 1
     expected = source_lines(src)
     missing, extra = sum((expected - shown).values()), sum((shown - expected).values())

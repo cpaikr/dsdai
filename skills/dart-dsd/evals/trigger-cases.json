@@ -8,7 +8,8 @@
     "분기검토보고서 DSD 주석 표에 행 하나 추가해 줘",
     "Compare the two .dsd drafts and tell me which numbers changed.",
     "DART 편집기 파일(.dsd) 기간을 2025년 12월 31일로 바꿔줘",
-    "Check whether my edited .dsd will still open cleanly in DART Editor."
+    "Check whether my edited .dsd will still open cleanly in DART Editor.",
+    "감사보고서 dsd를 엑셀로 변환해서 재무제표랑 주석을 시트별로 나눠줘"
   ],
   "should_not_trigger": [
     "OpenDART API로 삼성전자 사업보고서 원문 받아줘",

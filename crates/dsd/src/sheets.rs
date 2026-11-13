@@ -379,6 +379,7 @@ impl Partition<'_> {
         if let Some(table) = doc.table_for_node(node) {
             if !self.scope.plain
                 && let Some(title) = statement_title(&first_cell_text(doc, table))
+                && !self.repeats_statement_title(&title)
             {
                 self.open(SheetKind::Statement, title.clone(), title);
             }
@@ -403,15 +404,26 @@ impl Partition<'_> {
             .map(|t| collapse(&node_text(tree, t, false)))
             .filter(|t| !t.is_empty())
         {
-            let kind = if statement_title(&title).is_some() { SheetKind::Statement } else { SheetKind::Section };
+            let (kind, name) = match statement_title(&title) {
+                Some(compacted) => (SheetKind::Statement, compacted),
+                None => (SheetKind::Section, title.clone()),
+            };
             let notes = compact(&title).contains("주석");
             // A nested section keeps the note numbering it sits in.
             let note = if tag == "SECTION-2" { self.scope.note } else { None };
             let scope = Scope { plain: self.scope.plain, notes, note };
-            self.region(node, kind, title.clone(), title, scope);
+            self.region(node, kind, title, name, scope);
         } else {
             self.walk(node);
         }
+    }
+
+    /// The current sheet already is this statement and holds no table yet:
+    /// a statement section whose first table repeats its title.
+    fn repeats_statement_title(&self, title: &str) -> bool {
+        self.current.map(|i| &self.parts[i]).is_some_and(|p| {
+            p.kind == SheetKind::Statement && p.name == title && !p.blocks.iter().any(|b| matches!(b, Block::Table(_)))
+        })
     }
 
     /// A region opens its own sheet; afterwards the parent's sheet continues.
@@ -636,6 +648,16 @@ impl<'a> Layout<'a> {
         if ncols + 1 > MAX_COLS as usize {
             return Err(Error::invalid(format!("T{index} has {ncols} columns; Excel sheets hold {MAX_COLS}")));
         }
+        if !table.issues.is_empty() {
+            self.warnings.push(Issue::warning(
+                "table-grid-problem",
+                format!(
+                    "T{index} on sheet {:?} has {} grid problem(s) (see `dsd check`); cells outside its grid are not exported",
+                    self.sheet.name,
+                    table.issues.len()
+                ),
+            ));
+        }
         let (top, rows, cols) = (self.row, nrows as u32, ncols as u16);
         let border = doc.attr(table.node, "BORDER").is_some_and(|b| b.trim() == "1");
         let tree = &doc.tree;
@@ -653,7 +675,7 @@ impl<'a> Layout<'a> {
                 let role = if tree.tag(cell.node) == "TH" { Role::Header } else { Role::Plain };
                 if !is_origin {
                     // Covered by a merge, or by an overlapping cell when no merge was possible.
-                    if !self.in_merge(row, col) && border {
+                    if border && merge_of(table, cell.row - 1, cell.col - 1, top).is_none() {
                         self.sheet.cells.push(Cell { row, col, value: None, role, border, wrap: false });
                     }
                     continue;
@@ -694,13 +716,6 @@ impl<'a> Layout<'a> {
         Ok(())
     }
 
-    fn in_merge(&self, row: u32, col: u16) -> bool {
-        self.sheet
-            .merges
-            .iter()
-            .any(|m| (m.first_row..=m.last_row).contains(&row) && (m.first_col..=m.last_col).contains(&col))
-    }
-
     fn finish(mut self) -> Result<Sheet> {
         if self.row > MAX_ROWS {
             return Err(Error::invalid(format!(
@@ -708,7 +723,10 @@ impl<'a> Layout<'a> {
                 self.sheet.name, self.row
             )));
         }
-        self.sheet.rows = self.sheet.cells.iter().map(|c| c.row + 1).max().unwrap_or(0);
+        let cells = self.sheet.cells.iter().map(|c| c.row + 1);
+        let merges = self.sheet.merges.iter().map(|m| m.last_row + 1);
+        let tables = self.placements.iter().filter(|p| p.sheet == self.index).map(|p| p.row + p.rows);
+        self.sheet.rows = cells.chain(merges).chain(tables).max().unwrap_or(0);
         Ok(self.sheet)
     }
 }
@@ -870,6 +888,33 @@ mod tests {
         assert_eq!(lines(sheet(&wb, "재무상태표")), ["재 무 상 태 표", "제 5 기", "과 목", "자산", "뒷말"]);
         assert_eq!(sheet(&wb, "재무상태표").tables, [1, 2]);
         assert_eq!(lines(sheet(&wb, "감사의 개요")), ["감사의 개요", "끝"]);
+    }
+
+    #[test]
+    fn a_statement_section_with_its_title_table_keeps_one_sheet() {
+        let wb = book(&section(
+            "SECTION-2",
+            "재 무 상 태 표",
+            &format!("{}{}{}", table("재 무 상 태 표", &[]), table("과 목", &[]), table("재무상태표", &[])),
+        ));
+        assert_eq!(sheets(&wb), [("재무상태표", SheetKind::Statement), ("재무상태표 (2)", SheetKind::Statement)]);
+        assert_eq!(wb.sheets[1].title, "재 무 상 태 표");
+        assert_eq!(wb.sheets[1].tables, [1, 2], "a later title table still opens a sheet");
+    }
+
+    #[test]
+    fn cells_outside_the_grid_are_reported() {
+        let wb = book("<TABLE><COLGROUP><COL/></COLGROUP><TBODY><TR><TD>a</TD><TD>b</TD></TR></TBODY></TABLE>");
+        assert!(wb.warnings.iter().any(|w| w.code == "table-grid-problem"), "{:?}", wb.warnings);
+    }
+
+    #[test]
+    fn rows_count_rows_covered_by_a_span() {
+        let wb = book(
+            "<TABLE><COLGROUP><COL/><COL/></COLGROUP><TBODY><TR><TD ROWSPAN=\"2\">a</TD><TD>b</TD></TR><TR><TD></TD></TR></TBODY></TABLE>",
+        );
+        let p = wb.placements[0];
+        assert_eq!(wb.sheets[1].rows, p.row + p.rows);
     }
 
     #[test]

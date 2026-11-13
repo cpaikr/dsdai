@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.7 done. Next action: step 1.8 |
+| Phase 1 | 1.1–1.8 done; the sample workbook is in the owner's local sample folder. Next action: 1.9 (owner opens it in Excel and signs off) and the open rule below |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -75,9 +75,8 @@ Recorded during implementation:
   before, so the byte-preservation invariant holds. The committed public
   fixture was regenerated for the same reason (identical member contents).
   zlib-rs is pure Rust (Zlib license), so no C toolchain is added.
-- **Size and licenses (1.1).** The writer adds about 1.7 MB to a release
-  executable (measured with the release profile on a probe; the v0.1.2
-  Windows executable is 7.06 MB). New licenses are MIT, Apache-2.0, Zlib,
+- **Size and licenses (1.1).** The writer adds about 1.75 MB to the
+  release executable (Windows: 7.06 MB at v0.1.2, 8.81 MB with the export). New licenses are MIT, Apache-2.0, Zlib,
   and CC0/MIT-0 alternatives; `scripts/release.py` ships only `LICENSE.md`
   and needs no change. `calamine` is a dev-dependency only.
 - **Partition details (1.2).** A `PART`/`SECTION-1`/`SECTION-2` sheet whose
@@ -122,6 +121,13 @@ Recorded during implementation:
   cells keep `node_text`'s rule so they stay equal to `dsd table`; the same
   loss therefore remains in `table`, `find`, `diff`, and `compare` output,
   left unchanged here because it alters existing commands (a follow-up).
+- **Review fixes (1.8).** A statement section whose first table repeats its
+  title keeps one sheet, named by the compacted title (it used to get an
+  extra one-row sheet with the spaced title). A table with grid problems
+  gets a `table-grid-problem` warning, since cells outside its declared
+  grid are not exported (`dsd table` omits them too). `sheets[].rows`
+  counts rows covered only by a span. The corpus check also compares each
+  number cell's number format with one derived independently.
 - **Corpus check (1.7).** Container cells of nested tables are compared by
   their own lines in order, since `dsd table` flattens the nested table into
   the cell. Text lines are compared as a multiset of whitespace-free lines
@@ -131,12 +137,15 @@ Recorded during implementation:
 
 Open, for the owner (affects the sheet split):
 
-- Rule 3 applies inside a notes region too, so an appropriation statement
-  table (`이익잉여금처분계산서`) inside its note opens a statement sheet and
-  the rest of that note follows it until the next note heading. The
-  reference workbook keeps it on the note's sheet. Of the corpus, only the
-  working sample has this case. Keeping it on the note would be a one-line
-  rule: no statement sheets inside a notes region.
+- Rule 3 applies inside a notes region too, so a statement-named table in
+  a note opens a statement sheet and the rest of that note follows it until
+  the next note heading. Cases: the appropriation statement
+  (`이익잉여금처분계산서`) inside the retained-earnings note (the working
+  sample has one; the reference workbook keeps it on the note's sheet) and
+  a summary table titled `요약재무상태표` in a subsidiary or associate note
+  (reproduced on a synthetic variant; not in the corpus). Keeping them on
+  the note would be a one-line rule: no statement sheets inside a notes
+  region.
 
 ## What the reference workbook taught us
 
@@ -324,7 +333,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
   to match `dsd table` — text cells exactly, number cells by an independent
   parse of the source text — and every text line to be present. Print sample
   indexes and counts only.
-- [ ] **1.8 Docs and skill**: README command list and example,
+- [x] **1.8 Docs and skill**: README command list and example,
   ARCHITECTURE boundaries, a short export section in the skill's reading
   reference with routing from `SKILL.md`. Then `/code-review` and
   `/harmonize-docs changes`.
