@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.4 done. Next action: step 1.5 |
+| Phase 1 | 1.1–1.5 done. Next action: step 1.6 |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -111,6 +111,9 @@ Recorded during implementation:
   that still occurs is reported as `invalid_argument`. Sheet names are always
   single-quoted in defined names and internal links. Header cells are bold,
   centred both ways, and filled `#D9D9D9`; markers are 8 pt grey `#808080`.
+- **CLI details (1.5).** `-o -` is refused with `invalid_argument` (a
+  workbook never goes to stdout). `counts.numberCells`/`textCells` count
+  table cells only. `sheets[].rows` is the last used row.
 
 ## What the reference workbook taught us
 
@@ -286,7 +289,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
   digits).
 - [x] **1.4 Writer** (`xlsx.rs`): styles, merges, widths, links, defined
   names, index sheet, bounds checks against Excel's row/column limits.
-- [ ] **1.5 CLI**: `Command::Xlsx`, handler, help text, `Command::name`.
+- [x] **1.5 CLI**: `Command::Xlsx`, handler, help text, `Command::name`.
 - [ ] **1.6 CLI tests** in `crates/dsd-cli/tests/cli.rs`, against a fixture
   variant that adds a synthetic statement title table and a notes region
   (built in the test with `replace_once`; `fixtures/public/sample/` stays as
