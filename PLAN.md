@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.2 done. Next action: step 1.3 |
+| Phase 1 | 1.1–1.3 done. Next action: step 1.4 |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -99,6 +99,13 @@ Recorded during implementation:
   A spanning cell merges only when it owns every grid position of its span;
   an overlapping (malformed) span is written unmerged. Text with line breaks
   wraps.
+- **Typing details (1.3).** Whitespace is ignored only around the figure
+  and between a sign or parenthesis and its digits (`( 1,234 )`, `▲ 1,234`);
+  whitespace between digits keeps a cell text. A negative zero (`(0)`, `-0`)
+  stays text because Excel would show `0`. Only the ASCII hyphen counts as a
+  nil dash or minus sign. Percentages are parsed by moving the decimal point,
+  so `12.5%` is exactly the double nearest 0.125. The nil-dash format is
+  `#,##0;-#,##0;"-"`, so a value typed over it later still reads as an amount.
 
 ## What the reference workbook taught us
 
@@ -269,7 +276,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
   name sanitizing, table placement, nested tables. Unit tests for statement
   title detection, note splitting inside and outside a notes region, a
   heading after a line break, and name collisions.
-- [ ] **1.3 Cell typing** (in `sheets.rs` or a small `amount.rs`): the table
+- [x] **1.3 Cell typing** (in `sheets.rs` or a small `amount.rs`): the table
   above as unit tests, plus the refusals (bad grouping, leading zeros, long
   digits).
 - [ ] **1.4 Writer** (`xlsx.rs`): styles, merges, widths, links, defined

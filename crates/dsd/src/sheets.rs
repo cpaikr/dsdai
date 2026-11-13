@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use crate::amount;
 use crate::check::Issue;
 use crate::compare::{next_note, note_heading};
 use crate::doc::{BLOCK_TEXT_TAGS, CR_TOKEN, Doc, Table, is_scaffold};
@@ -662,6 +663,9 @@ impl<'a> Layout<'a> {
                 let wrap = text.contains('\n');
                 let value = if text.is_empty() {
                     None
+                } else if let Some(a) = amount::parse(&text) {
+                    self.counts.number_cells += 1;
+                    Some(Value::Number { value: a.value, format: a.format })
                 } else {
                     self.counts.text_cells += 1;
                     Some(Value::Text(text))
@@ -904,6 +908,32 @@ mod tests {
             ["2. 회계정책", "(1) 기준", "1. 목록 항목", "9. 너무 먼 번호", "구 분", "금액"]
         );
         assert_eq!(sheet(&wb, "주석2").title, "2. 회계정책");
+    }
+
+    #[test]
+    fn table_cells_are_typed_by_display_fidelity() {
+        let wb = book(&table("1,234", &["(500)", "5,6,32", "2025", "-", "12.5%", "1,234 (*1)", "　"]));
+        let values: Vec<Option<Value>> = wb.sheets[1]
+            .cells
+            .iter()
+            .filter(|c| c.row >= FIRST_CONTENT_ROW && c.role != Role::Marker)
+            .map(|c| c.value.clone())
+            .collect();
+        let number = |value: f64, format: &str| Some(Value::Number { value, format: format.into() });
+        assert_eq!(
+            values,
+            [
+                number(1234.0, "#,##0"),
+                number(-500.0, "0;(0)"),
+                Some(Value::Text("5,6,32".into())),
+                number(2025.0, "0"),
+                number(0.0, "#,##0;-#,##0;\"-\""),
+                number(0.125, "0.0%"),
+                Some(Value::Text("1,234 (*1)".into())),
+                None,
+            ]
+        );
+        assert_eq!((wb.counts.number_cells, wb.counts.text_cells), (5, 2));
     }
 
     #[test]
