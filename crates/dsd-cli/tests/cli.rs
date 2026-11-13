@@ -1686,6 +1686,23 @@ fn xlsx_guards_its_output() {
 }
 
 #[test]
+fn xlsx_places_a_paragraph_table_after_its_own_note_heading() {
+    use calamine::{Data, Reader};
+    let w = Work::new("xlsx-slot");
+    // A literal [표] before a note heading must not take the table that follows the heading.
+    let notes = "<SECTION-2><TITLE>주석</TITLE>\r\n<P>1. 일반사항</P>\r\n<P>[표]&amp;cr;2. 리스\
+<TABLE><COLGROUP><COL WIDTH=\"100\"></COL></COLGROUP><TBODY><TR><TD>리스 표</TD></TR></TBODY></TABLE></P>\r\n</SECTION-2>\r\n";
+    let src = w.variant("slot.dsd", &replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{notes}")));
+    let out = w.path("out.xlsx");
+    let r = dsd(["xlsx", &s(&src), "-o", &s(&out)]).ok();
+    let last = r["tables"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((last["table"].as_u64(), last["sheet"].as_str()), (Some(5), Some("주석2")));
+    let mut book = open_xlsx(&out);
+    let note1 = book.worksheet_range("주석1").unwrap();
+    assert_eq!(note1.get_value((4, 0)), Some(&Data::String("[표]".into())), "the literal mark stays as text");
+}
+
+#[test]
 fn xlsx_exports_unverified_content_with_a_warning() {
     use calamine::{Data, Reader};
     let w = Work::new("xlsx-unverified");

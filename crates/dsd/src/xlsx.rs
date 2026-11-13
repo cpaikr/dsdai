@@ -17,6 +17,12 @@ use crate::sheets::{Cell, Role, Sheet, Value, Workbook, workbook};
 const HEADER_FILL: u32 = 0x00D9_D9D9;
 /// Excel's default row height for the default 11 pt font.
 const LINE_HEIGHT_PT: f64 = 15.0;
+/// Excel's default column width, and glyph width estimates for the default
+/// 11 pt font: Hangul and other wide characters, and everything else.
+const DEFAULT_COL_PX: u16 = 64;
+const WIDE_GLYPH_PX: u32 = 15;
+const NARROW_GLYPH_PX: u32 = 8;
+const CELL_PADDING_PX: u32 = 8;
 const MARKER_GREY: u32 = 0x0080_8080;
 
 /// The workbook model and its xlsx bytes.
@@ -68,16 +74,27 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
         ws.merge_range(m.first_row, m.first_col, m.last_row, m.last_col, "", &format)?;
     }
     // Excel fits row heights to wrapped text, but not inside a merged range: give
-    // a row that holds a multi-line merge the height of its tallest wrapped cell.
+    // a row that holds a multi-line merge the height of its tallest wrapped cell,
+    // estimating how its lines also wrap at the merged width.
+    let width = |first: u16, last: u16| {
+        (first..=last).map(|c| u32::from(sheet.widths.get(&c).copied().unwrap_or(DEFAULT_COL_PX))).sum::<u32>()
+    };
     let mut heights: BTreeMap<u32, usize> = BTreeMap::new();
     for m in sheet.merges.iter().filter(|m| m.first_row == m.last_row) {
         if let Some(c) = at.get(&(m.first_row, m.first_col)).filter(|c| c.wrap) {
-            heights.insert(m.first_row, line_count(c));
+            heights.insert(m.first_row, line_count(c, width(m.first_col, m.last_col)));
         }
     }
+    let spans: HashMap<(u32, u16), u16> = sheet
+        .merges
+        .iter()
+        .filter(|m| m.first_row == m.last_row)
+        .map(|m| ((m.first_row, m.first_col), m.last_col))
+        .collect();
     for c in sheet.cells.iter().filter(|c| c.wrap) {
         if let Some(h) = heights.get_mut(&c.row) {
-            *h = (*h).max(line_count(c));
+            let last = spans.get(&(c.row, c.col)).copied().unwrap_or(c.col);
+            *h = (*h).max(line_count(c, width(c.col, last)));
         }
     }
     for (&row, &lines) in &heights {
@@ -103,11 +120,19 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
     Ok(())
 }
 
-fn line_count(cell: &Cell) -> usize {
-    match &cell.value {
-        Some(Value::Text(t)) => t.split('\n').count(),
-        _ => 1,
-    }
+/// Displayed lines of a wrapped cell `width_px` wide: its own lines, each
+/// wrapping by an estimate of the default font's glyph widths (on the wide
+/// side, so text is not clipped).
+fn line_count(cell: &Cell, width_px: u32) -> usize {
+    let Some(Value::Text(text)) = &cell.value else { return 1 };
+    let usable = width_px.saturating_sub(CELL_PADDING_PX).max(NARROW_GLYPH_PX);
+    text.split('\n')
+        .map(|line| {
+            let px: u32 =
+                line.chars().map(|c| if u32::from(c) >= 0x1100 { WIDE_GLYPH_PX } else { NARROW_GLYPH_PX }).sum();
+            px.div_ceil(usable).max(1) as usize
+        })
+        .sum()
 }
 
 fn format_of(cell: &Cell, num_format: Option<&str>) -> Format {
@@ -198,5 +223,18 @@ mod tests {
         let sheet = member(&bytes, "xl/worksheets/sheet2.xml");
         assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"45\" customHeight=\"1\">")), "{sheet}");
         assert!(!sheet.contains(&format!("<row r=\"{}\" spans=\"1:2\" ht=", row + 1)), "unmerged rows autofit");
+    }
+
+    #[test]
+    fn a_long_line_in_a_narrow_merge_counts_its_wrapped_lines() {
+        // Two 50 px columns leave 92 px; 20 Hangul syllables need about 300 px (4 lines), plus one more line.
+        let body = format!(
+            "<SECTION-1><TITLE>폭</TITLE><TABLE><COLGROUP><COL WIDTH=\"50\"/><COL WIDTH=\"50\"/></COLGROUP><TBODY><TR><TD COLSPAN=\"2\">{}&amp;cr;끝</TD></TR></TBODY></TABLE></SECTION-1>",
+            "가".repeat(20)
+        );
+        let (model, bytes) = export(&doc(&body)).unwrap();
+        let row = model.placements[0].row + 1;
+        let sheet = member(&bytes, "xl/worksheets/sheet2.xml");
+        assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"75\" customHeight=\"1\">")), "{sheet}");
     }
 }

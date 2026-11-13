@@ -16,8 +16,8 @@ use crate::compare::{next_note, note_heading};
 use crate::doc::{BLOCK_TEXT_TAGS, CR_TOKEN, Doc, Table, is_scaffold};
 use crate::error::{Error, Result};
 use crate::text::{
-    NESTED_TABLE_MARK, block_text_outside_tables, collapse, compact, is_py_space, node_text, node_text_outside_tables,
-    unverified_schema, unverified_tags,
+    NESTED_TABLE_MARK, TABLE_SLOT, block_text_outside_tables, collapse, compact, is_py_space, node_text,
+    node_text_outside_tables, unverified_schema, unverified_tags,
 };
 use crate::xml::{Item, NodeId};
 
@@ -465,20 +465,20 @@ impl Partition<'_> {
         if squeezed.is_empty() {
             return;
         }
-        // Tables directly inside the block, each shown as one placeholder line.
+        // Tables directly inside the block, each a TABLE_SLOT line of `text`.
         let tables: Vec<NodeId> = tree
             .iter_tag(node, "TABLE")
             .into_iter()
             .filter(|&n| !tree.ancestors(n).into_iter().take_while(|&a| a != node).any(|a| tree.tag(a) == "TABLE"))
             .collect();
         let mut pending = tables.iter().copied();
-        if squeezed == NESTED_TABLE_MARK && !tables.is_empty() {
+        if squeezed.chars().all(|c| TABLE_SLOT.starts_with(c)) {
             // A wrapper around a table only: its tables are the content.
             pending.by_ref().for_each(|t| self.table_tree(t));
             return;
         }
         let bold = tag == "TITLE" || tag == "COVER-TITLE";
-        let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+        let lines: Vec<&str> = text.split('\n').collect();
         let mut start = 0;
         if tag == "P" && self.scope.notes && !self.scope.plain {
             // A note heading opens a sheet, even after a line break.
@@ -499,10 +499,12 @@ impl Partition<'_> {
         pending.for_each(|t| self.table_tree(t));
     }
 
-    /// Text lines, then the tables whose placeholders they hold, on the current sheet.
-    fn segment(&mut self, lines: &[String], bold: bool, tables: &mut impl Iterator<Item = NodeId>) {
-        self.push(Block::Lines { lines: lines.to_vec(), bold });
-        for _ in lines.iter().filter(|l| l.trim_matches(is_py_space) == NESTED_TABLE_MARK) {
+    /// Text lines, with each table slot shown as [`NESTED_TABLE_MARK`], then
+    /// the tables those slots stand for, on the current sheet.
+    fn segment(&mut self, lines: &[&str], bold: bool, tables: &mut impl Iterator<Item = NodeId>) {
+        let shown = lines.iter().map(|&l| if l == TABLE_SLOT { NESTED_TABLE_MARK } else { l }.to_owned()).collect();
+        self.push(Block::Lines { lines: shown, bold });
+        for _ in lines.iter().filter(|&&l| l == TABLE_SLOT) {
             if let Some(t) = tables.next() {
                 self.table_tree(t);
             }
@@ -1062,6 +1064,13 @@ mod tests {
         ));
         assert_eq!(sheet(&wb, "주석1").tables, [1], "the table precedes the next heading");
         assert_eq!(lines(sheet(&wb, "주석2")), ["2. 리스", NESTED_TABLE_MARK], "a literal mark is text");
+        let wb = book(&section(
+            "SECTION-2",
+            "주석",
+            &format!("<P>1. 일반사항</P><P>{NESTED_TABLE_MARK}&amp;cr;2. 리스{}</P>", table("둘째 표", &[])),
+        ));
+        assert!(sheet(&wb, "주석1").tables.is_empty(), "a literal mark takes no table");
+        assert_eq!(sheet(&wb, "주석2").tables, [1]);
     }
 
     #[test]

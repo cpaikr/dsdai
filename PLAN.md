@@ -139,7 +139,11 @@ Recorded during implementation:
   - `result.tables` is in document order even when 본문 gathers content from
     both sides of a region.
   - A row holding a multi-line single-row merge gets a height of 15 pt per
-    line, since Excel does not fit merged cells.
+    displayed line, since Excel does not fit merged cells. Lines are counted
+    after estimated wrapping at the merged width (15 px per wide glyph, 8 px
+    otherwise); the estimate errs tall.
+  - Text lines mark a nested table with a sentinel that XML cannot contain,
+    so a literal `[표]` is never taken for a table.
   - Merge membership and merge origins are looked up once, not rescanned.
 - **Corpus check (1.7).** Container cells of nested tables are compared by
   their own lines in order, since `dsd table` flattens the nested table into

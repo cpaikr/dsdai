@@ -268,25 +268,55 @@ def source_lines(path: Path) -> Counter:
     return lines
 
 
-def table_cell_ok(text: str, got) -> tuple[bool, bool]:
+CELL_TAGS = {"TH", "TD", "TE", "TU"}
+
+
+def compact(text: str) -> str:
+    """Text without any whitespace, Unicode included."""
+    return "".join(text.split())
+
+
+def container_cells(path: Path) -> dict:
+    """{(table, row, k): text} for cells holding a nested table, where k is the
+    0-based position of the cell in its TR and the text is the cell's own
+    content with each nested table as the placeholder, read independently."""
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("contents.xml"))
+
+    def own(el: ET.Element) -> str:
+        if el.tag in SCAFFOLD:
+            return ""
+        if el.tag == "TABLE":
+            return NESTED_MARK
+        return (el.text or "") + "".join(own(c) + (c.tail or "") for c in el)
+
+    found = {}
+    for n, table in enumerate(root.iter("TABLE"), 1):
+        rows = []
+        for child in table:
+            if child.tag == "TR":
+                rows.append(child)
+            elif child.tag in ("THEAD", "TBODY", "TFOOT"):
+                rows.extend(tr for tr in child if tr.tag == "TR")
+        for r, tr in enumerate(rows, 1):
+            for k, cell in enumerate(c for c in tr if c.tag in CELL_TAGS):
+                if cell.find(".//TABLE") is not None:
+                    found[(n, r, k)] = compact(own(cell).replace("&cr;", ""))
+    return found
+
+
+def table_cell_ok(text: str, got, container) -> tuple[bool, bool]:
     """Whether a workbook cell matches its `dsd table` text, and whether it
-    is a container cell showing a nested table as a placeholder."""
+    is a container cell. `container` is the cell's own text from the source
+    when it holds a nested table: `dsd table` flattens the nested table into
+    the cell, while the workbook shows a placeholder and places it apart."""
+    if container is not None:
+        return got is not None and got[0] == "s" and compact(got[1]) == container, True
     expect = figure(text)
     if text == "":
         return got is None or got == ("s", ""), False
     if expect is not None:
         return got == ("n", *expect), False
-    if got and got[0] == "s" and got[1] != text and NESTED_MARK in got[1].split("\n"):
-        # `dsd table` flattens the nested table into the cell, possibly within a
-        # line; the workbook places it on its own. The container's own text must
-        # appear in order in the flattened text.
-        flat, at = squeeze(text), 0
-        for part in (squeeze(line) for line in got[1].split("\n") if line != NESTED_MARK):
-            at = flat.find(part, at)
-            if at < 0:
-                return False, True
-            at += len(part)
-        return True, True
     return got == ("s", text), False
 
 
@@ -310,6 +340,7 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
         fail(f"{label}: xlsx maps {len(numbers)} of {count} tables ({unmapped} reported unmapped)")
     views = {t["index"]: t for t in dsd("table", str(src), *map(str, numbers))["result"]["tables"]} if numbers else {}
     mismatches = containers = 0
+    nested = container_cells(src)
     claimed: dict = {}  # per sheet: table grid positions and markers, which are not text lines
     for entry in result["tables"]:
         n = entry["table"]
@@ -321,14 +352,16 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
         mine.add((top, left + view["colCount"]))
         mine.update((top + r, left + c) for r in range(view["rowCount"]) for c in range(view["colCount"]))
         for row in view["rows"]:
+            k = 0  # position among the row's own cells, as in its TR
             for cell in row["cells"]:
                 got = cells.get((top + row["row"] - 1, left + cell["col"] - 1))
                 if "text" not in cell:
-                    ok, nested = got is None or got == ("s", ""), False  # covered or missing: empty
+                    ok, is_container = got is None or got == ("s", ""), False  # covered or missing: empty
                 else:
-                    ok, nested = table_cell_ok(cell["text"], got)
+                    ok, is_container = table_cell_ok(cell["text"], got, nested.get((n, row["row"], k)))
+                    k += 1
                 mismatches += not ok
-                containers += nested
+                containers += is_container
     shown: Counter = Counter()
     for name, cells in sheets.items():
         if name == INDEX_SHEET:
