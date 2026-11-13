@@ -4,6 +4,8 @@
 //! this module only maps roles to styles. No file I/O, and no clock: the
 //! document creation time is pinned so the same model yields the same bytes.
 
+use std::collections::{BTreeMap, HashMap};
+
 use rust_xlsxwriter::{
     Color, DocProperties, ExcelDateTime, Format, FormatAlign, FormatBorder, Url, Workbook as Book, Worksheet, XlsxError,
 };
@@ -13,6 +15,8 @@ use crate::error::{Error, Result};
 use crate::sheets::{Cell, Role, Sheet, Value, Workbook, workbook};
 
 const HEADER_FILL: u32 = 0x00D9_D9D9;
+/// Excel's default row height for the default 11 pt font.
+const LINE_HEIGHT_PT: f64 = 15.0;
 const MARKER_GREY: u32 = 0x0080_8080;
 
 /// The workbook model and its xlsx bytes.
@@ -56,11 +60,28 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
     for (&col, &px) in &sheet.widths {
         ws.set_column_width_pixels(col, u32::from(px))?;
     }
+    let at: HashMap<(u32, u16), &Cell> = sheet.cells.iter().map(|c| ((c.row, c.col), c)).collect();
     // Merges first: each writes its range's style; the value then lands on its first cell.
     for m in &sheet.merges {
-        let origin = sheet.cells.iter().find(|c| (c.row, c.col) == (m.first_row, m.first_col));
+        let origin = at.get(&(m.first_row, m.first_col));
         let format = origin.map_or_else(Format::new, |c| format_of(c, None));
         ws.merge_range(m.first_row, m.first_col, m.last_row, m.last_col, "", &format)?;
+    }
+    // Excel fits row heights to wrapped text, but not inside a merged range: give
+    // a row that holds a multi-line merge the height of its tallest wrapped cell.
+    let mut heights: BTreeMap<u32, usize> = BTreeMap::new();
+    for m in sheet.merges.iter().filter(|m| m.first_row == m.last_row) {
+        if let Some(c) = at.get(&(m.first_row, m.first_col)).filter(|c| c.wrap) {
+            heights.insert(m.first_row, line_count(c));
+        }
+    }
+    for c in sheet.cells.iter().filter(|c| c.wrap) {
+        if let Some(h) = heights.get_mut(&c.row) {
+            *h = (*h).max(line_count(c));
+        }
+    }
+    for (&row, &lines) in &heights {
+        ws.set_row_height(row, LINE_HEIGHT_PT * lines as f64)?;
     }
     for cell in &sheet.cells {
         match &cell.value {
@@ -80,6 +101,13 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
         }
     }
     Ok(())
+}
+
+fn line_count(cell: &Cell) -> usize {
+    match &cell.value {
+        Some(Value::Text(t)) => t.split('\n').count(),
+        _ => 1,
+    }
 }
 
 fn format_of(cell: &Cell, num_format: Option<&str>) -> Format {
@@ -135,5 +163,40 @@ mod tests {
         let (model, bytes) = export(&doc(BODY)).unwrap();
         assert_eq!(model.sheets[1].name, "시험 '구역", "a trailing apostrophe is not allowed");
         assert!(!bytes.is_empty());
+    }
+
+    /// One member of a zip, located through its central directory.
+    fn member(zip: &[u8], name: &str) -> String {
+        let u16_at = |i: usize| usize::from(u16::from_le_bytes([zip[i], zip[i + 1]]));
+        let u32_at = |i: usize| u32::from_le_bytes(zip[i..i + 4].try_into().unwrap()) as usize;
+        let eocd = zip.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let mut at = u32_at(eocd + 16);
+        for _ in 0..u16_at(eocd + 10) {
+            let (method, csize) = (u16_at(at + 10), u32_at(at + 20));
+            let (nlen, xlen, clen, offset) = (u16_at(at + 28), u16_at(at + 30), u16_at(at + 32), u32_at(at + 42));
+            if &zip[at + 46..at + 46 + nlen] == name.as_bytes() {
+                let start = offset + 30 + u16_at(offset + 26) + u16_at(offset + 28);
+                let data = &zip[start..start + csize];
+                let mut out = String::new();
+                if method == 8 {
+                    std::io::Read::read_to_string(&mut flate2::read::DeflateDecoder::new(data), &mut out).unwrap();
+                } else {
+                    out = String::from_utf8(data.to_vec()).unwrap();
+                }
+                return out;
+            }
+            at += 46 + nlen + xlen + clen;
+        }
+        panic!("no member {name}");
+    }
+
+    #[test]
+    fn rows_with_a_multi_line_merge_get_a_height() {
+        let body = "<SECTION-1><TITLE>높이</TITLE><TABLE><COLGROUP><COL/><COL/></COLGROUP><TBODY><TR><TD COLSPAN=\"2\">가&amp;cr;나&amp;cr;다</TD></TR><TR><TD>a&amp;cr;b</TD><TD>c</TD></TR></TBODY></TABLE></SECTION-1>";
+        let (model, bytes) = export(&doc(body)).unwrap();
+        let row = model.placements[0].row + 1;
+        let sheet = member(&bytes, "xl/worksheets/sheet2.xml");
+        assert!(sheet.contains(&format!("<row r=\"{row}\" spans=\"1:3\" ht=\"45\" customHeight=\"1\">")), "{sheet}");
+        assert!(!sheet.contains(&format!("<row r=\"{}\" spans=\"1:2\" ht=", row + 1)), "unmerged rows autofit");
     }
 }

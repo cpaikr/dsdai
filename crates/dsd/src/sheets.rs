@@ -254,6 +254,9 @@ pub fn workbook(doc: &Doc) -> Result<Workbook> {
     }
     sheets[0] = index_sheet(&sheets);
     counts.sheets = sheets.len();
+    // A sheet can gather content from both sides of a region (본문), so layout
+    // order is not document order; table numbers are.
+    placements.sort_by_key(|p| p.table);
     counts.tables = placements.len();
     Ok(Workbook { sheets, placements, counts, warnings })
 }
@@ -312,8 +315,14 @@ fn statement_title(text: &str) -> Option<String> {
     (c.chars().count() <= MAX_STATEMENT_TITLE && STATEMENT_NAMES.iter().any(|n| c.ends_with(n))).then_some(c)
 }
 
+/// The first non-empty cell's own text; a nested table counts only as its placeholder.
 fn first_cell_text(doc: &Doc, table: &Table) -> String {
-    table.cells.iter().map(|c| node_text(&doc.tree, c.node, false)).find(|t| !compact(t).is_empty()).unwrap_or_default()
+    table
+        .cells
+        .iter()
+        .map(|c| node_text_outside_tables(&doc.tree, c.node))
+        .find(|t| !compact(t).is_empty())
+        .unwrap_or_default()
 }
 
 /// Loose text in a container, split into lines as block text is.
@@ -412,7 +421,7 @@ impl Partition<'_> {
                 Some(compacted) => (SheetKind::Statement, compacted),
                 None => (SheetKind::Section, title.clone()),
             };
-            let notes = compact(&title).contains("주석");
+            let notes = compact(&title).contains("주석") || (tag == "SECTION-2" && self.scope.notes);
             // A nested section keeps the note numbering it sits in.
             let note = if tag == "SECTION-2" { self.scope.note } else { None };
             let scope = Scope { plain: self.scope.plain, notes, note };
@@ -450,31 +459,60 @@ impl Partition<'_> {
     }
 
     fn text_block(&mut self, node: NodeId, tag: &str) {
-        let text = block_text_outside_tables(&self.doc.tree, node);
+        let tree = &self.doc.tree;
+        let text = block_text_outside_tables(tree, node);
         let squeezed = compact(&text);
         if squeezed.is_empty() {
             return;
         }
-        if squeezed != NESTED_TABLE_MARK {
-            let bold = tag == "TITLE" || tag == "COVER-TITLE";
-            let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
-            let mut start = 0;
-            if tag == "P" && self.scope.notes && !self.scope.plain {
-                // A note heading opens a sheet, even after a line break.
-                for (i, line) in lines.iter().enumerate() {
-                    let Some((n, _)) = note_heading(line) else { continue };
-                    if !next_note(self.scope.note, n) {
-                        continue;
-                    }
-                    if i > start {
-                        self.push(Block::Lines { lines: lines[start..i].to_vec(), bold });
-                    }
-                    self.scope.note = Some(n);
-                    self.open(SheetKind::Note, collapse(line), format!("주석{n}"));
-                    start = i;
+        // Tables directly inside the block, each shown as one placeholder line.
+        let tables: Vec<NodeId> = tree
+            .iter_tag(node, "TABLE")
+            .into_iter()
+            .filter(|&n| !tree.ancestors(n).into_iter().take_while(|&a| a != node).any(|a| tree.tag(a) == "TABLE"))
+            .collect();
+        let mut pending = tables.iter().copied();
+        if squeezed == NESTED_TABLE_MARK && !tables.is_empty() {
+            // A wrapper around a table only: its tables are the content.
+            pending.by_ref().for_each(|t| self.table_tree(t));
+            return;
+        }
+        let bold = tag == "TITLE" || tag == "COVER-TITLE";
+        let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+        let mut start = 0;
+        if tag == "P" && self.scope.notes && !self.scope.plain {
+            // A note heading opens a sheet, even after a line break.
+            for (i, line) in lines.iter().enumerate() {
+                let Some((n, _)) = note_heading(line) else { continue };
+                if !next_note(self.scope.note, n) {
+                    continue;
                 }
+                if i > start {
+                    self.segment(&lines[start..i], bold, &mut pending);
+                }
+                self.scope.note = Some(n);
+                self.open(SheetKind::Note, collapse(line), format!("주석{n}"));
+                start = i;
             }
-            self.push(Block::Lines { lines: lines[start..].to_vec(), bold });
+        }
+        self.segment(&lines[start..], bold, &mut pending);
+        pending.for_each(|t| self.table_tree(t));
+    }
+
+    /// Text lines, then the tables whose placeholders they hold, on the current sheet.
+    fn segment(&mut self, lines: &[String], bold: bool, tables: &mut impl Iterator<Item = NodeId>) {
+        self.push(Block::Lines { lines: lines.to_vec(), bold });
+        for _ in lines.iter().filter(|l| l.trim_matches(is_py_space) == NESTED_TABLE_MARK) {
+            if let Some(t) = tables.next() {
+                self.table_tree(t);
+            }
+        }
+    }
+
+    /// A table nested in a block, followed by the tables nested inside it.
+    fn table_tree(&mut self, node: NodeId) {
+        if let Some(t) = self.doc.table_for_node(node) {
+            self.push(Block::Table(t.index));
         }
         self.nested_tables(node);
     }
@@ -665,6 +703,9 @@ impl<'a> Layout<'a> {
         let (top, rows, cols) = (self.row, nrows as u32, ncols as u16);
         let border = doc.attr(table.node, "BORDER").is_some_and(|b| b.trim() == "1");
         let tree = &doc.tree;
+        // Whether each cell's span became a merge, decided at its origin (which
+        // row-major order reaches before any position it covers).
+        let mut merged = vec![false; table.cells.len()];
         for ri in 0..nrows {
             for ci in 0..ncols {
                 let (row, col) = (top + ri as u32, ci as u16);
@@ -679,7 +720,7 @@ impl<'a> Layout<'a> {
                 let role = if tree.tag(cell.node) == "TH" { Role::Header } else { Role::Plain };
                 if !is_origin {
                     // Covered by a merge, or by an overlapping cell when no merge was possible.
-                    if border && merge_of(table, cell.row - 1, cell.col - 1, top).is_none() {
+                    if border && !owner.is_some_and(|i| merged[i]) {
                         self.sheet.cells.push(Cell { row, col, value: None, role, border, wrap: false });
                     }
                     continue;
@@ -698,6 +739,9 @@ impl<'a> Layout<'a> {
                 };
                 if let Some(merge) = merge_of(table, ri, ci, top) {
                     self.sheet.merges.push(merge);
+                    if let Some(i) = owner {
+                        merged[i] = true;
+                    }
                 }
                 if value.is_some() || border || role == Role::Header {
                     self.sheet.cells.push(Cell { row, col, value, role, border, wrap });
@@ -1007,6 +1051,49 @@ mod tests {
         assert_eq!(sheets(&wb).iter().map(|s| s.0).collect::<Vec<_>>(), ["주석", "주석20", "주석21"]);
         assert_eq!(sheet(&wb, "주석20").tables, [1, 2]);
         assert_eq!(lines(sheet(&wb, "주석21")), ["21. 관계기업", "요약재무상태표", "뒷말"]);
+    }
+
+    #[test]
+    fn paragraph_tables_stay_with_their_segment_and_literal_marks_are_text() {
+        let wb = book(&section(
+            "SECTION-2",
+            "주석",
+            &format!("<P>1. 일반사항</P><P>앞{}&amp;cr;2. 리스</P><P>{NESTED_TABLE_MARK}</P>", table("첫 표", &[])),
+        ));
+        assert_eq!(sheet(&wb, "주석1").tables, [1], "the table precedes the next heading");
+        assert_eq!(lines(sheet(&wb, "주석2")), ["2. 리스", NESTED_TABLE_MARK], "a literal mark is text");
+    }
+
+    #[test]
+    fn nested_sections_of_a_notes_region_keep_splitting_notes() {
+        let wb = book(&section(
+            "SECTION-1",
+            "주석",
+            &section("SECTION-2", "상세정보", &format!("<P>1. 일반사항</P>{}", table("요약재무상태표", &[]))),
+        ));
+        assert_eq!(sheets(&wb).iter().map(|s| s.0).collect::<Vec<_>>(), ["주석", "상세정보", "주석1"]);
+        assert_eq!(sheet(&wb, "주석1").tables, [1]);
+    }
+
+    #[test]
+    fn a_nested_table_does_not_make_its_container_a_statement() {
+        let wb = book(&section(
+            "SECTION-1",
+            "가",
+            &format!(
+                "<TABLE><COLGROUP><COL/></COLGROUP><TBODY><TR><TD>{}</TD></TR></TBODY></TABLE>",
+                table("재무상태표", &[])
+            ),
+        ));
+        assert_eq!(sheets(&wb), [("가", SheetKind::Section)]);
+    }
+
+    #[test]
+    fn placements_follow_document_order() {
+        let wb =
+            book(&format!("{}{}{}", table("a", &[]), section("SECTION-1", "가", &table("b", &[])), table("c", &[])));
+        assert_eq!(wb.placements.iter().map(|p| p.table).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(sheet(&wb, "본문").tables, [1, 3]);
     }
 
     #[test]

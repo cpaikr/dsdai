@@ -242,8 +242,9 @@ def source_lines(path: Path) -> Counter:
 
     def flush() -> None:
         for line in "".join(buf).replace("\r", "").replace("\n", "").split("&cr;"):
-            if squeeze(line):
-                lines[squeeze(line)] += 1
+            line = squeeze(line.rstrip())  # str.rstrip trims Unicode whitespace, as the exporter does
+            if line and line != NESTED_MARK:
+                lines[line] += 1
         buf.clear()
 
     def walk(el: ET.Element) -> None:
@@ -276,11 +277,16 @@ def table_cell_ok(text: str, got) -> tuple[bool, bool]:
     if expect is not None:
         return got == ("n", *expect), False
     if got and got[0] == "s" and got[1] != text and NESTED_MARK in got[1].split("\n"):
-        # `dsd table` flattens the nested table into the cell; the workbook
-        # places it on its own, so the container's own lines appear in order.
-        rest = iter(text.split("\n"))
-        own = [line for line in got[1].split("\n") if line != NESTED_MARK]
-        return all(any(line == r for r in rest) for line in own), True
+        # `dsd table` flattens the nested table into the cell, possibly within a
+        # line; the workbook places it on its own. The container's own text must
+        # appear in order in the flattened text.
+        flat, at = squeeze(text), 0
+        for part in (squeeze(line) for line in got[1].split("\n") if line != NESTED_MARK):
+            at = flat.find(part, at)
+            if at < 0:
+                return False, True
+            at += len(part)
+        return True, True
     return got == ("s", text), False
 
 

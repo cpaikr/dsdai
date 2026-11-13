@@ -128,6 +128,19 @@ Recorded during implementation:
   grid are not exported (`dsd table` omits them too). `sheets[].rows`
   counts rows covered only by a span. The corpus check also compares each
   number cell's number format with one derived independently.
+- **PR review fixes (after 1.9).**
+  - A `SECTION-2` inside a notes region stays a notes region, so its
+    paragraphs still open note sheets.
+  - A paragraph's tables follow the text segment that holds their placeholder,
+    so a table before a later note heading stays on the earlier note.
+  - Only a paragraph that wraps a real table is skipped as a wrapper; a
+    literal `[표]` is text.
+  - Statement-title detection reads the first cell without nested tables.
+  - `result.tables` is in document order even when 본문 gathers content from
+    both sides of a region.
+  - A row holding a multi-line single-row merge gets a height of 15 pt per
+    line, since Excel does not fit merged cells.
+  - Merge membership and merge origins are looked up once, not rescanned.
 - **Corpus check (1.7).** Container cells of nested tables are compared by
   their own lines in order, since `dsd table` flattens the nested table into
   the cell. Text lines are compared as a multiset of whitespace-free lines
