@@ -34,7 +34,7 @@ struct Unit {
 
 /// `Some((number, title))` when a line opens a numbered note: "12. 종속기업투자".
 /// A heading is short and is not a sentence; "3.1." is a subsection.
-fn note_heading(line: &str) -> Option<(u32, String)> {
+pub(crate) fn note_heading(line: &str) -> Option<(u32, String)> {
     let first = line.trim_start_matches(|c: char| c.is_whitespace());
     let digits: String = first.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() || digits.len() > 2 {
@@ -61,7 +61,7 @@ fn note_headings(text: &str) -> Vec<(usize, u32, String)> {
 }
 
 /// Notes run upward; a heading far ahead of the current note is a numbered list item.
-fn next_note(current: Option<u32>, n: u32) -> bool {
+pub(crate) fn next_note(current: Option<u32>, n: u32) -> bool {
     current.is_none_or(|c| n > c && n <= c + 5)
 }
 

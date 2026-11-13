@@ -15,6 +15,7 @@ pub mod doc;
 pub mod edit;
 mod error;
 pub mod schema;
+pub mod sheets;
 pub mod structure;
 pub mod text;
 pub mod views;

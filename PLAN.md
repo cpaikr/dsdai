@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1 done (writer is deterministic). Next action: step 1.2 |
+| Phase 1 | 1.1–1.2 done. Next action: step 1.3 |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -80,6 +80,25 @@ Recorded during implementation:
   Windows executable is 7.06 MB). New licenses are MIT, Apache-2.0, Zlib,
   and CC0/MIT-0 alternatives; `scripts/release.py` ships only `LICENSE.md`
   and needs no change. `calamine` is a dev-dependency only.
+- **Partition details (1.2).** A `PART`/`SECTION-1`/`SECTION-2` sheet whose
+  title passes the statement-title test is kind `statement`, not `section`
+  (so the index labels it correctly). A nested `SECTION-2` keeps the note
+  numbering of its parent, as `compare` does. The region's own `TITLE`
+  stays a bold content row as well as the row-1 sheet title, so content rows
+  hold every text line. Sheets that would be empty are dropped. Names are
+  compared case-insensitively (as Excel does), `History` is reserved, and
+  every name that differs from its title (sanitized, shortened, or numbered)
+  gets a `sheet-name-changed` warning. Excel's 32,767-character cell limit
+  fails the export with `invalid_argument`, like the row and column limits.
+- **Layout details (1.2).** Index sheet: row 1 title, row 3 headers
+  (`시트`, `구분`, `제목`), one row per sheet from row 4, rows 1–3 frozen;
+  `구분` shows Korean kind labels (`표지`, `목차`, `본문`, `섹션`, `재무제표`,
+  `주석`). An image row reads `[이미지] <member>`. A table that cannot be
+  mapped (oversized or without a grid) gets one grey `[T#] …` line and a
+  `table-not-mapped` warning. `COL` widths are clamped to 24–360 px.
+  A spanning cell merges only when it owns every grid position of its span;
+  an overlapping (malformed) span is written unmerged. Text with line breaks
+  wraps.
 
 ## What the reference workbook taught us
 
@@ -246,7 +265,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
   pedantic lints stays clean; `scripts/release.py` packaging and its tests
   need no change for the new licenses. If determinism cannot be had, stop and
   raise it before going further.
-- [ ] **1.2 Model and partition** (`sheets.rs`): walker, sheet boundaries,
+- [x] **1.2 Model and partition** (`sheets.rs`): walker, sheet boundaries,
   name sanitizing, table placement, nested tables. Unit tests for statement
   title detection, note splitting inside and outside a notes region, a
   heading after a line break, and name collisions.
