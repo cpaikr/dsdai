@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from decimal import Decimal
 import os
 import re
 import subprocess
@@ -139,6 +140,255 @@ def source_text(path: Path) -> str:
     return squeeze(walk(root).replace("&cr;", ""))
 
 
+# ---------------------------------------------------------------------------
+# xlsx export: the workbook is read back with the standard library only.
+
+XL = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+XL_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+BLOCK_TAGS = {"P", "TITLE", "COVER-TITLE", "IMG-CAPTION", "WARNING", "SUBTITLE", "IMG"}
+INDEX_SHEET = "총괄표"
+IMAGE_MARK = "[이미지] "
+NESTED_MARK = "[표]"
+UNMAPPED_LINE = re.compile(r"^\[T\d+\] \d+x\d+ table ")
+FIGURE = re.compile(
+    r"^(?P<open>[(△▲-])?\s*(?P<int>[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.(?P<frac>[0-9]+))?(?P<pct>%)?\s*(?P<close>\))?$"
+)
+# Excel's built-in number formats the writer refers to by id instead of by code.
+BUILTIN_FORMATS = {0: "General", 1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%"}
+
+
+def cell_position(ref: str) -> tuple[int, int]:
+    """0-based (row, col) of an A1 reference, with or without `$`."""
+    m = re.match(r"\$?([A-Z]+)\$?(\d+)$", ref)
+    col = 0
+    for ch in m.group(1):
+        col = col * 26 + ord(ch) - 64
+    return int(m.group(2)) - 1, col - 1
+
+
+def read_workbook(path: Path) -> tuple[dict, dict]:
+    """Cells per sheet as {(row, col): ("s", text) | ("n", float, number format)},
+    and each defined name as (sheet, first cell, last cell)."""
+    with zipfile.ZipFile(path) as zf:
+        book = ET.fromstring(zf.read("xl/workbook.xml"))
+        styles = ET.fromstring(zf.read("xl/styles.xml"))
+        codes = dict(BUILTIN_FORMATS)
+        codes.update({int(f.get("numFmtId")): f.get("formatCode") for f in styles.iter(f"{XL}numFmt")})
+        xfs = styles.find(f"{XL}cellXfs")
+        cell_formats = [codes.get(int(xf.get("numFmtId", "0")), "?") for xf in xfs.iter(f"{XL}xf")]
+        rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))}
+        shared = []
+        if "xl/sharedStrings.xml" in zf.namelist():
+            for si in ET.fromstring(zf.read("xl/sharedStrings.xml")).iter(f"{XL}si"):
+                shared.append("".join(t.text or "" for t in si.iter(f"{XL}t")))
+        sheets = {}
+        for sheet in book.iter(f"{XL}sheet"):
+            target = rels[sheet.get(f"{XL_REL}id")].lstrip("/")
+            target = target if target.startswith("xl/") else "xl/" + target
+            cells = {}
+            for c in ET.fromstring(zf.read(target)).iter(f"{XL}c"):
+                v, kind, pos = c.find(f"{XL}v"), c.get("t"), cell_position(c.get("r"))
+                if kind == "s" and v is not None:
+                    cells[pos] = ("s", shared[int(v.text)])
+                elif kind == "inlineStr":
+                    cells[pos] = ("s", "".join(t.text or "" for t in c.iter(f"{XL}t")))
+                elif kind == "str" and v is not None:
+                    cells[pos] = ("s", v.text or "")
+                elif v is not None:
+                    cells[pos] = ("n", float(v.text), cell_formats[int(c.get("s", "0"))])
+            sheets[sheet.get("name")] = cells
+        names = {}
+        for dn in book.iter(f"{XL}definedName"):
+            sheet, _, area = dn.text.lstrip("=").rpartition("!")
+            first, _, last = area.partition(":")
+            sheet = sheet[1:-1].replace("''", "'") if sheet.startswith("'") else sheet
+            names[dn.get("name")] = (sheet, cell_position(first), cell_position(last or first))
+    return sheets, names
+
+
+def figure(text: str):
+    """The number and number format a table text should become, derived
+    independently of the CLI; None when it must stay text."""
+    t = text.strip()
+    if t == "-":
+        return 0.0, '#,##0;-#,##0;"-"'
+    m = FIGURE.match(t)
+    if not m or (m["open"] == "(") != bool(m["close"]):
+        return None
+    digits = m["int"].replace(",", "")
+    if m["int"].startswith("0") and ("," in m["int"] or len(digits) > 1):
+        return None
+    if len((digits + (m["frac"] or "")).lstrip("0")) > 15:
+        return None
+    value = Decimal(digits + ("." + m["frac"] if m["frac"] else ""))
+    if m["pct"]:
+        value /= 100
+    fmt = ("#,##0" if "," in m["int"] else "0") + ("." + "0" * len(m["frac"]) if m["frac"] else "") + (m["pct"] or "")
+    if m["open"]:
+        if value == 0:
+            return None
+        value = -value
+        fmt += {"(": f";({fmt})", "-": f";-{fmt}"}.get(m["open"], f';"{m["open"]}"{fmt}')
+    return float(value), fmt
+
+
+def source_lines(path: Path) -> Counter:
+    """Squeezed text lines outside tables, scaffolding, and the document
+    header, read independently with ElementTree."""
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("contents.xml"))
+    lines: Counter = Counter()
+    buf: list = []
+
+    def flush() -> None:
+        for line in "".join(buf).replace("\r", "").replace("\n", "").split("&cr;"):
+            line = squeeze(line.rstrip())  # str.rstrip trims Unicode whitespace, as the exporter does
+            if line and line != NESTED_MARK:
+                lines[line] += 1
+        buf.clear()
+
+    def walk(el: ET.Element) -> None:
+        if el.tag in SCAFFOLD or el.tag == "DOCUMENT-HEADER":
+            return
+        if el.tag == "TABLE":
+            flush()
+            return
+        block = el.tag in BLOCK_TAGS
+        if block:
+            flush()
+        buf.append(el.text or "")
+        for child in el:
+            walk(child)
+            buf.append(child.tail or "")
+        if block:
+            flush()
+
+    walk(root)
+    flush()
+    return lines
+
+
+CELL_TAGS = {"TH", "TD", "TE", "TU"}
+
+
+def compact(text: str) -> str:
+    """Text without any whitespace, Unicode included."""
+    return "".join(text.split())
+
+
+def container_cells(path: Path) -> dict:
+    """{(table, row, k): text} for cells holding a nested table, where k is the
+    0-based position of the cell in its TR and the text is the cell's own
+    content with each nested table as the placeholder, read independently."""
+    with zipfile.ZipFile(path) as zf:
+        root = ET.fromstring(zf.read("contents.xml"))
+
+    def own(el: ET.Element) -> str:
+        if el.tag in SCAFFOLD:
+            return ""
+        if el.tag == "TABLE":
+            return NESTED_MARK
+        return (el.text or "") + "".join(own(c) + (c.tail or "") for c in el)
+
+    found = {}
+    for n, table in enumerate(root.iter("TABLE"), 1):
+        rows = []
+        for child in table:
+            if child.tag == "TR":
+                rows.append(child)
+            elif child.tag in ("THEAD", "TBODY", "TFOOT"):
+                rows.extend(tr for tr in child if tr.tag == "TR")
+        for r, tr in enumerate(rows, 1):
+            for k, cell in enumerate(c for c in tr if c.tag in CELL_TAGS):
+                if cell.find(".//TABLE") is not None:
+                    found[(n, r, k)] = compact(own(cell).replace("&cr;", ""))
+    return found
+
+
+def table_cell_ok(text: str, got, container) -> tuple[bool, bool]:
+    """Whether a workbook cell matches its `dsd table` text, and whether it
+    is a container cell. `container` is the cell's own text from the source
+    when it holds a nested table: `dsd table` flattens the nested table into
+    the cell, while the workbook shows a placeholder and places it apart."""
+    if container is not None:
+        return got is not None and got[0] == "s" and compact(got[1]) == container, True
+    expect = figure(text)
+    if text == "":
+        return got is None or got == ("s", ""), False
+    if expect is not None:
+        return got == ("n", *expect), False
+    return got == ("s", text), False
+
+
+def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
+    """Export twice (byte-identical), read the workbook back, and require
+    every table origin cell to match `dsd table` and every text line to be
+    present. Prints counts only."""
+    out, again = tmp / "a.xlsx", tmp / "b.xlsx"
+    envelope = dsd("xlsx", str(src), "-o", str(out))
+    if not envelope["ok"]:
+        fail(f"{label}: `xlsx` failed with {envelope['error']['code']}")
+        return
+    result = envelope["result"]
+    if not dsd("xlsx", str(src), "-o", str(again))["ok"] or out.read_bytes() != again.read_bytes():
+        fail(f"{label}: xlsx output is not byte-identical across runs")
+    sheets, names = read_workbook(out)
+    unmapped = sum(1 for w in envelope["warnings"] if w["code"] == "table-not-mapped")
+    count = dsd("read", str(src))["result"]["tables"]
+    numbers = [t["table"] for t in result["tables"]]
+    if len(numbers) + unmapped != count or numbers != sorted(set(numbers)):
+        fail(f"{label}: xlsx maps {len(numbers)} of {count} tables ({unmapped} reported unmapped)")
+    views = {t["index"]: t for t in dsd("table", str(src), *map(str, numbers))["result"]["tables"]} if numbers else {}
+    mismatches = containers = 0
+    nested = container_cells(src)
+    claimed: dict = {}  # per sheet: table grid positions and markers, which are not text lines
+    for entry in result["tables"]:
+        n = entry["table"]
+        sheet, (top, left), (bottom, right) = names[f"DSD_T{n}"]
+        view = views[n]
+        if (sheet, bottom - top + 1, right - left + 1) != (entry["sheet"], view["rowCount"], view["colCount"]):
+            mismatches += 1
+        cells, mine = sheets[sheet], claimed.setdefault(sheet, set())
+        mine.add((top, left + view["colCount"]))
+        mine.update((top + r, left + c) for r in range(view["rowCount"]) for c in range(view["colCount"]))
+        for row in view["rows"]:
+            k = 0  # position among the row's own cells, as in its TR
+            for cell in row["cells"]:
+                got = cells.get((top + row["row"] - 1, left + cell["col"] - 1))
+                if "text" not in cell:
+                    ok, is_container = got is None or got == ("s", ""), False  # covered or missing: empty
+                else:
+                    ok, is_container = table_cell_ok(cell["text"], got, nested.get((n, row["row"], k)))
+                    k += 1
+                mismatches += not ok
+                containers += is_container
+    shown: Counter = Counter()
+    for name, cells in sheets.items():
+        if name == INDEX_SHEET:
+            continue
+        for pos, (kind, value, *_) in cells.items():
+            # Rows 1-2 hold the sheet title and the index link.
+            if pos[0] < 3 or pos in claimed.get(name, set()) or kind != "s" or UNMAPPED_LINE.match(value):
+                continue
+            value = value.removeprefix(IMAGE_MARK)
+            for line in value.split("\n"):
+                # A paragraph's nested table is placed on its own; its placeholder is not source text.
+                if squeeze(line) and line != NESTED_MARK:
+                    shown[squeeze(line)] += 1
+    expected = source_lines(src)
+    missing, extra = sum((expected - shown).values()), sum((shown - expected).values())
+    if mismatches:
+        fail(f"{label}: xlsx has {mismatches} table cell mismatch(es)")
+    if missing or extra:
+        fail(f"{label}: xlsx text lines differ ({missing} missing, {extra} extra)")
+    if not mismatches and not missing and not extra:
+        c = result["counts"]
+        print(
+            f"ok   {label}: xlsx {c['sheets']} sheets, {c['tables']} tables, {c['numberCells']} number and "
+            f"{c['textCells']} text cells, {sum(expected.values())} text lines, {containers} nested-table container(s)"
+        )
+
+
 def corpus_smoke() -> None:
     """Run the built CLI over the public fixture and any private samples.
 
@@ -181,6 +431,9 @@ def corpus_smoke() -> None:
                     fail(f"{label}: extract/pack round trip is not byte-identical")
                 else:
                     print(f"ok   {label}: check, complete read, outline, byte-identical round trip")
+            xlsx_dir = Path(tmp) / f"x{i}"
+            xlsx_dir.mkdir()
+            xlsx_smoke(label, src, xlsx_dir)
 
 
 def main() -> int:

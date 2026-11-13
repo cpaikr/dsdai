@@ -62,6 +62,7 @@ pub fn run(command: Command) -> Outcome {
         Command::Compare { base, other, format, output, force, all, limit } => {
             compare(&base, &other, format, output.as_deref(), force, all, limit)
         }
+        Command::Xlsx { file, output, force } => xlsx(&file, &output, force),
         Command::Diff { original, edited, limit, raw, format } => diff(&original, &edited, limit, raw, format.format),
         Command::SetCell { file, write, target, col, text, unit_value, flatten } => {
             let src = read_archive(&file)?;
@@ -229,6 +230,41 @@ fn read(file: &Path, output: Option<&Path>, force: bool, scaffold: bool, no_head
         "rows": view.rows.len(),
         "tables": view.tables,
     }))
+}
+
+fn xlsx(file: &Path, out: &Path, force: bool) -> Outcome {
+    if out.as_os_str() == "-" {
+        return Err(Error::invalid("a workbook is binary and is never written to stdout; pass -o PATH")
+            .with_hint("for example: dsd xlsx report.dsd -o report.xlsx")
+            .into());
+    }
+    let arc = read_archive(file)?;
+    let doc = document(&arc)?;
+    guard_output(out, force, &[file])?;
+    if same_file(out, file) {
+        return Err(Failure::new(ErrorCode::OutputExists, "refusing to write the workbook over the source .dsd"));
+    }
+    let (model, bytes) = dsd::xlsx::export(&doc)?;
+    atomic_write(out, &bytes)?;
+    let sheets: Vec<Value> = model
+        .sheets
+        .iter()
+        .map(|s| json!({"name": s.name, "kind": s.kind, "title": s.title, "rows": s.rows, "tables": s.tables}))
+        .collect();
+    let tables: Vec<Value> = model
+        .placements
+        .iter()
+        .map(|p| json!({"table": p.table, "sheet": model.sheets[p.sheet].name, "range": p.range(), "name": p.name()}))
+        .collect();
+    let result = json!({
+        "output": out.display().to_string(),
+        "bytes": bytes.len(),
+        "sha256": sha256_hex(&bytes),
+        "sheets": sheets,
+        "tables": tables,
+        "counts": model.counts,
+    });
+    Ok(Output::Json { result, warnings: model.warnings.into_iter().map(Warning::from).collect() })
 }
 
 fn table(file: &Path, numbers: &[usize], spans: bool, format: Format) -> Outcome {

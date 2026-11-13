@@ -22,44 +22,79 @@ fn layout_free(text: &str) -> String {
 ///
 /// Literal newlines in the XML are layout, not content, so they are dropped.
 pub fn node_text(tree: &Tree, node: NodeId, include_scaffold: bool) -> String {
-    text_of(tree, node, include_scaffold, true)
+    text_of(tree, node, Rules { include_scaffold, table_mark: None, raw_inline: false })
 }
 
 /// Placeholder for a nested table in [`node_text_outside_tables`].
 pub const NESTED_TABLE_MARK: &str = "[표]";
 
+/// The line [`block_text_outside_tables`] gives a nested table. XML cannot
+/// hold this character, so the line never comes from document text.
+pub const TABLE_SLOT: &str = "\u{1f}";
+
 /// Like [`node_text`] without scaffolding, but a table inside the node is
 /// replaced by [`NESTED_TABLE_MARK`] on its own line, so a nested table's
 /// cell boundaries are never flattened into the surrounding text.
 pub fn node_text_outside_tables(tree: &Tree, node: NodeId) -> String {
-    text_of(tree, node, false, false)
+    text_of(tree, node, Rules { include_scaffold: false, table_mark: Some(NESTED_TABLE_MARK), raw_inline: false })
 }
 
-fn text_of(tree: &Tree, node: NodeId, include_scaffold: bool, nested_tables: bool) -> String {
-    const BOUNDARY: char = '\u{1e}';
+/// Like [`node_text_outside_tables`], but text inside SPAN and other
+/// non-block children joins the line as written: a `&cr;` or a space at the
+/// edge of a SPAN is kept instead of being trimmed with that child. A nested
+/// table is a [`TABLE_SLOT`] line, which literal `[표]` text cannot be
+/// mistaken for. The xlsx export uses it for text lines. (Cell text keeps
+/// [`node_text`]'s rule so it stays equal to what `table` reports.)
+pub fn block_text_outside_tables(tree: &Tree, node: NodeId) -> String {
+    text_of(tree, node, Rules { include_scaffold: false, table_mark: Some(TABLE_SLOT), raw_inline: true })
+}
+
+const BOUNDARY: char = '\u{1e}';
+
+#[derive(Clone, Copy)]
+struct Rules {
+    include_scaffold: bool,
+    /// `Some(mark)`: a nested table becomes this line; `None`: its text is included.
+    table_mark: Option<&'static str>,
+    /// Collect non-block children in place instead of trimming each on its own.
+    raw_inline: bool,
+}
+
+fn text_of(tree: &Tree, node: NodeId, rules: Rules) -> String {
     let mut joined = String::new();
+    collect(tree, node, rules, &mut joined);
+    finish(&joined)
+}
+
+/// The node's content with block boundaries marked.
+fn collect(tree: &Tree, node: NodeId, rules: Rules, joined: &mut String) {
     for item in &tree.node(node).items {
         match item {
             Item::Text(t) => joined.push_str(&layout_free(t)),
             Item::Node(child) => {
                 let tag = tree.tag(*child);
-                if is_scaffold(tag) && !include_scaffold {
+                if is_scaffold(tag) && !rules.include_scaffold {
                     continue;
                 }
-                if tag == "TABLE" && !nested_tables {
+                if let Some(mark) = rules.table_mark.filter(|_| tag == "TABLE") {
                     joined.push(BOUNDARY);
-                    joined.push_str(NESTED_TABLE_MARK);
+                    joined.push_str(mark);
                     joined.push(BOUNDARY);
                 } else if BLOCK_TEXT_TAGS.contains(&tag) {
                     joined.push(BOUNDARY);
-                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables));
+                    joined.push_str(&text_of(tree, *child, rules));
                     joined.push(BOUNDARY);
+                } else if rules.raw_inline {
+                    collect(tree, *child, rules, joined);
                 } else {
-                    joined.push_str(&text_of(tree, *child, include_scaffold, nested_tables));
+                    joined.push_str(&text_of(tree, *child, rules));
                 }
             }
         }
     }
+}
+
+fn finish(joined: &str) -> String {
     // Adjacent blocks are separated by one newline; &cr; runs keep their blank lines.
     let joined = joined.replace(CR_TOKEN, "\n");
     let text = joined

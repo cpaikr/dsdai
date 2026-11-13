@@ -35,5 +35,6 @@ tokio.workspace = true
 workspace = true
 
 [dev-dependencies]
+calamine.workspace = true
 crc32fast.workspace = true
 encoding_rs.workspace = true
