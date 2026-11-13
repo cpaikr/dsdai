@@ -17,7 +17,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 | Item | State |
 |---|---|
 | Branch | `feat/xlsx-export` |
-| Phase 1 | 1.1–1.3 done. Next action: step 1.4 |
+| Phase 1 | 1.1–1.4 done. Next action: step 1.5 |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -106,6 +106,11 @@ Recorded during implementation:
   nil dash or minus sign. Percentages are parsed by moving the decimal point,
   so `12.5%` is exactly the double nearest 0.125. The nil-dash format is
   `#,##0;-#,##0;"-"`, so a value typed over it later still reads as an amount.
+- **Writer details (1.4).** Bounds are checked while building the model
+  (`sheets.rs`), so the writer only maps roles to styles; any writer error
+  that still occurs is reported as `invalid_argument`. Sheet names are always
+  single-quoted in defined names and internal links. Header cells are bold,
+  centred both ways, and filled `#D9D9D9`; markers are 8 pt grey `#808080`.
 
 ## What the reference workbook taught us
 
@@ -279,7 +284,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
 - [x] **1.3 Cell typing** (in `sheets.rs` or a small `amount.rs`): the table
   above as unit tests, plus the refusals (bad grouping, leading zeros, long
   digits).
-- [ ] **1.4 Writer** (`xlsx.rs`): styles, merges, widths, links, defined
+- [x] **1.4 Writer** (`xlsx.rs`): styles, merges, widths, links, defined
   names, index sheet, bounds checks against Excel's row/column limits.
 - [ ] **1.5 CLI**: `Command::Xlsx`, handler, help text, `Command::name`.
 - [ ] **1.6 CLI tests** in `crates/dsd-cli/tests/cli.rs`, against a fixture

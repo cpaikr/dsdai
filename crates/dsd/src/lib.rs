@@ -20,6 +20,7 @@ pub mod sheets;
 pub mod structure;
 pub mod text;
 pub mod views;
+pub mod xlsx;
 pub mod xml;
 
 pub use archive::{Archive, read_archive};
