@@ -16,8 +16,8 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 
 | Item | State |
 |---|---|
-| Branch | `feat/xlsx-export` (created, no code yet) |
-| Phase 1 | Not started. Next action: step 1.1 |
+| Branch | `feat/xlsx-export` |
+| Phase 1 | 1.1 done (writer is deterministic). Next action: step 1.2 |
 | Phase 2 | Blocked on the Phase 1 gate |
 
 Update this table and the step checkboxes as work lands. Record decisions made
@@ -57,6 +57,29 @@ step 1.2:
   other regions by their section title.
 - A nil dash (`-`) becomes the number 0 displayed as `-`.
 - Each table gets a small grey `T#` marker beside its first row.
+
+Recorded during implementation:
+
+- **Determinism (1.1).** `DocProperties::set_creation_datetime` pins the
+  creation time, and the modified time follows it; the writer's zip layer
+  already uses a fixed member timestamp. A probe workbook (styles, merges,
+  links, defined names, Korean shared strings) was byte-identical across
+  three separate processes. The export pins 2000-01-01T00:00:00Z and leaves
+  author and company empty.
+- **Compression backend (1.1).** `rust_xlsxwriter` depends on `zip` with
+  its `deflate` feature, which enables `flate2/zlib-rs`; flate2 then prefers
+  zlib-rs over miniz_oxide for the whole workspace. There is no feature to
+  opt out. Consequence: a member that an edit recompresses (`contents.xml`)
+  gets different, still deterministic, deflate bytes than v0.1.2 wrote; the
+  decompressed bytes and every unchanged member's compressed bytes are as
+  before, so the byte-preservation invariant holds. The committed public
+  fixture was regenerated for the same reason (identical member contents).
+  zlib-rs is pure Rust (Zlib license), so no C toolchain is added.
+- **Size and licenses (1.1).** The writer adds about 1.7 MB to a release
+  executable (measured with the release profile on a probe; the v0.1.2
+  Windows executable is 7.06 MB). New licenses are MIT, Apache-2.0, Zlib,
+  and CC0/MIT-0 alternatives; `scripts/release.py` ships only `LICENSE.md`
+  and needs no change. `calamine` is a dev-dependency only.
 
 ## What the reference workbook taught us
 
@@ -215,7 +238,7 @@ crates/dsd-cli             `xlsx` command: guards, atomic write, envelope
 
 ### Steps
 
-- [ ] **1.1 Spike the writer.** Add `rust_xlsxwriter` (library) and
+- [x] **1.1 Spike the writer.** Add `rust_xlsxwriter` (library) and
   `calamine` (CLI dev-dependency). Confirm: two runs give identical bytes
   once the creation time is pinned (the API for that is **not yet
   confirmed** — check `DocProperties` in the docs first); the release
