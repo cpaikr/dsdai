@@ -16,7 +16,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 
 | Item | State |
 |---|---|
-| Branch | `feat/xlsx-export` |
+| Branch | `feat/xlsx-export`, open as PR #18 (review threads resolved, CI green). Next action: owner merges it |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
 | Phase 2 | Not started. Next action: step 2.1 (settle the open decisions with the owner) |
 
