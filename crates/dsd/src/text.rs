@@ -21,8 +21,11 @@ fn layout_free(text: &str) -> String {
 /// Plain text with DART line breaks (`&cr;`) and block boundaries as `\n`.
 ///
 /// Literal newlines in the XML are layout, not content, so they are dropped.
+/// Text inside SPAN and other non-block children joins the line as written,
+/// so a `&cr;` or a space at the edge of a SPAN is kept; only whole lines are
+/// trimmed.
 pub fn node_text(tree: &Tree, node: NodeId, include_scaffold: bool) -> String {
-    text_of(tree, node, Rules { include_scaffold, table_mark: None, raw_inline: false })
+    text_of(tree, node, Rules { include_scaffold, table_mark: None })
 }
 
 /// Placeholder for a nested table in [`node_text_outside_tables`].
@@ -36,17 +39,14 @@ pub const TABLE_SLOT: &str = "\u{1f}";
 /// replaced by [`NESTED_TABLE_MARK`] on its own line, so a nested table's
 /// cell boundaries are never flattened into the surrounding text.
 pub fn node_text_outside_tables(tree: &Tree, node: NodeId) -> String {
-    text_of(tree, node, Rules { include_scaffold: false, table_mark: Some(NESTED_TABLE_MARK), raw_inline: false })
+    text_of(tree, node, Rules { include_scaffold: false, table_mark: Some(NESTED_TABLE_MARK) })
 }
 
-/// Like [`node_text_outside_tables`], but text inside SPAN and other
-/// non-block children joins the line as written: a `&cr;` or a space at the
-/// edge of a SPAN is kept instead of being trimmed with that child. A nested
-/// table is a [`TABLE_SLOT`] line, which literal `[표]` text cannot be
-/// mistaken for. The xlsx export uses it for text lines. (Cell text keeps
-/// [`node_text`]'s rule so it stays equal to what `table` reports.)
+/// Like [`node_text_outside_tables`], but a nested table is a [`TABLE_SLOT`]
+/// line, which literal `[표]` text cannot be mistaken for. The xlsx export
+/// uses it for text lines.
 pub fn block_text_outside_tables(tree: &Tree, node: NodeId) -> String {
-    text_of(tree, node, Rules { include_scaffold: false, table_mark: Some(TABLE_SLOT), raw_inline: true })
+    text_of(tree, node, Rules { include_scaffold: false, table_mark: Some(TABLE_SLOT) })
 }
 
 const BOUNDARY: char = '\u{1e}';
@@ -56,8 +56,6 @@ struct Rules {
     include_scaffold: bool,
     /// `Some(mark)`: a nested table becomes this line; `None`: its text is included.
     table_mark: Option<&'static str>,
-    /// Collect non-block children in place instead of trimming each on its own.
-    raw_inline: bool,
 }
 
 fn text_of(tree: &Tree, node: NodeId, rules: Rules) -> String {
@@ -66,7 +64,9 @@ fn text_of(tree: &Tree, node: NodeId, rules: Rules) -> String {
     finish(&joined)
 }
 
-/// The node's content with block boundaries marked.
+/// The node's content with block boundaries marked. A non-block child is
+/// collected in place: trimming it on its own would drop a `&cr;` or a space
+/// at its edge and join two lines or words.
 fn collect(tree: &Tree, node: NodeId, rules: Rules, joined: &mut String) {
     for item in &tree.node(node).items {
         match item {
@@ -84,10 +84,8 @@ fn collect(tree: &Tree, node: NodeId, rules: Rules, joined: &mut String) {
                     joined.push(BOUNDARY);
                     joined.push_str(&text_of(tree, *child, rules));
                     joined.push(BOUNDARY);
-                } else if rules.raw_inline {
-                    collect(tree, *child, rules, joined);
                 } else {
-                    joined.push_str(&text_of(tree, *child, rules));
+                    collect(tree, *child, rules, joined);
                 }
             }
         }

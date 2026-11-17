@@ -308,6 +308,49 @@ fn find_is_whitespace_insensitive() {
 }
 
 #[test]
+fn span_edges_keep_line_breaks_and_spaces() {
+    // A `&cr;` alone in a SPAN and a space at a SPAN's end belong to the line:
+    // trimming each SPAN on its own used to join "기타" and "이어진 줄".
+    let w = Work::new("span-edges");
+    let spans = " <SPAN>&amp;cr;</SPAN><SPAN>이어진 </SPAN><SPAN>줄</SPAN>";
+    let span_xml = replace_once(&w.contents(), "<P>1. 일반사항</P>", &format!("<P>1. 일반사항{spans}</P>"));
+    let span_xml = replace_once(&span_xml, ">기타</TD>", &format!(">기타{spans}</TD>"));
+    let v = w.variant("span.dsd", &span_xml);
+    let (p, cell) = ("1. 일반사항\n이어진 줄", "기타\n이어진 줄");
+
+    let r = dsd(["table", &s(&v), "4"]).ok();
+    assert_eq!(r["tables"][0]["rows"][3]["cells"][0]["text"], cell);
+
+    let r = dsd(["find", &s(&v), "이어진 줄"]).ok();
+    let found: Vec<(&str, &str)> = r["matches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["locator"].as_str().unwrap(), m["text"].as_str().unwrap()))
+        .collect();
+    assert_eq!(found, [("L149", p), ("T4R4C1", cell)]);
+
+    assert_eq!(
+        diff_lines(&w.src(), &v),
+        [
+            "~ L149 -> L149  \"1. 일반사항\" -> \"1. 일반사항\\n이어진 줄\"",
+            "~ T4R4C1 -> T4R4C1  \"기타\" -> \"기타\\n이어진 줄\""
+        ]
+    );
+    // The same text written without SPANs reads the same.
+    let plain_xml = replace_once(&w.contents(), "<P>1. 일반사항</P>", "<P>1. 일반사항&amp;cr;이어진 줄</P>");
+    let plain = w.variant("plain.dsd", &replace_once(&plain_xml, ">기타</TD>", ">기타&amp;cr;이어진 줄</TD>"));
+    assert_eq!(diff_lines(&plain, &v), Vec::<String>::new());
+
+    let r = dsd(["compare", &s(&w.src()), &s(&v)]).ok();
+    let items = r["items"].as_array().unwrap();
+    let text = items.iter().find(|i| i["kind"] == "text").unwrap();
+    assert_eq!(text["text"]["other"], p);
+    let t4 = items.iter().find(|i| i["base"]["table"] == 4).unwrap();
+    assert_eq!(t4["cells"][0]["otherText"], cell);
+}
+
+#[test]
 fn table_coordinates_follow_spans() {
     let w = Work::new("table");
     let out = dsd(["table", &s(&w.src()), "4", "--format", "text"]).stdout;
