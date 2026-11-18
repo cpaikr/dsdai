@@ -9,9 +9,12 @@
 //! structure explains is **unresolved** (reported with its closest
 //! candidate); one with nothing to sum is **uncovered**.
 //!
-//! Structures that need no label to be found (a signed chain of statement
-//! lines, a table's last column) are kept only when they hold in every
-//! period, with at least two non-zero terms, so coincidences stay out.
+//! Structures that need no label to be found are kept only when they hold
+//! with at least two non-zero parts: a signed chain of statement lines in
+//! every period, a column summing the columns left of it in more than half
+//! its rows. Coincidences stay out.
+
+mod cross;
 
 use std::collections::HashSet;
 
@@ -29,8 +32,14 @@ pub struct Proposals {
     pub checks: Vec<Check>,
     /// Labelled totals no structure explains, each with its closest candidate.
     pub unresolved: Vec<Check>,
-    /// Labelled totals with nothing to sum: (kind, table, row, col).
+    /// Statement amounts found in their notes for only some periods: offered
+    /// to the agent, never reported as errors.
+    pub candidates: Vec<Check>,
+    /// Labelled totals with nothing to sum, and statement amounts their
+    /// notes do not show: (kind, table, row, col).
     pub uncovered: Vec<(Kind, usize, usize, usize)>,
+    /// Why part of the document was not proposed over.
+    pub warnings: Vec<crate::check::Issue>,
 }
 
 /// Every proposal for the document, in table order.
@@ -48,8 +57,10 @@ pub fn propose(doc: &Doc) -> Proposals {
         let explained = grid.identities(&mut out);
         grid.horizontal(&mut out, &explained);
     }
+    cross::statement_notes(doc, &mut out);
+    cross::prior_closings(doc, &mut out);
     let mut seen = HashSet::new();
-    for c in out.checks.iter_mut().chain(out.unresolved.iter_mut()) {
+    for c in out.checks.iter_mut().chain(out.unresolved.iter_mut()).chain(out.candidates.iter_mut()) {
         if !seen.insert(c.id.clone()) {
             let mut n = 2;
             while !seen.insert(format!("{}#{n}", c.id)) {
@@ -71,6 +82,9 @@ enum V {
     Text,
     /// A position a spanning cell covers but does not start at.
     Covered,
+    /// A position no cell covers (a short row); the evaluator cannot read it,
+    /// so it is never summed or skipped over.
+    Missing,
 }
 
 /// Signed rows (vertical) or columns (horizontal).
@@ -109,7 +123,10 @@ impl<'a> Grid<'a> {
         let mut percent = vec![false; ncols];
         for r in 1..=nrows {
             for c in 1..=ncols {
-                let Some(cell) = table.cell_at_grid(r - 1, c - 1) else { continue };
+                let Some(cell) = table.cell_at_grid(r - 1, c - 1) else {
+                    v[r - 1][c - 1] = V::Missing;
+                    continue;
+                };
                 if cell.row != r || cell.col != c {
                     v[r - 1][c - 1] = V::Covered;
                     continue;
@@ -172,7 +189,7 @@ impl<'a> Grid<'a> {
             match self.at(r, c) {
                 V::Num(_) => nums += 1,
                 V::Text => texts += 1,
-                V::Blank | V::Covered => {}
+                V::Blank | V::Covered | V::Missing => {}
             }
         }
         nums > 0 && nums >= texts
@@ -219,7 +236,7 @@ impl<'a> Grid<'a> {
         for &c in g {
             match self.at(r, c) {
                 V::Num(x) if x != 0.0 => return Some((c, V::Num(x))),
-                v @ (V::Num(_) | V::Text) if found.is_none() => found = Some((c, v)),
+                v @ (V::Num(_) | V::Text | V::Missing) if found.is_none() => found = Some((c, v)),
                 _ => {}
             }
         }
@@ -377,7 +394,7 @@ impl<'a> Grid<'a> {
         if let Some((_, i)) = best {
             let (rule, kind, cand, _) = &cands[i];
             for g in self.applicable(t, cand) {
-                out.checks.push(self.vertical_check(g, t, *rule, *kind, cand));
+                out.checks.push(self.vertical_check(g, t, (*rule, *kind, "v"), cand));
             }
             return;
         }
@@ -390,7 +407,7 @@ impl<'a> Grid<'a> {
             .min_by(|a, b| self.miss(t, &a.2).total_cmp(&self.miss(t, &b.2)));
         if let Some((rule, kind, cand, _)) = closest {
             for g in self.applicable(t, cand) {
-                out.unresolved.push(self.vertical_check(g, t, *rule, *kind, cand));
+                out.unresolved.push(self.vertical_check(g, t, (*rule, *kind, "v"), cand));
             }
         }
     }
@@ -622,7 +639,7 @@ impl<'a> Grid<'a> {
         cands
     }
 
-    fn vertical_check(&self, g: &[usize], t: usize, rule: Rule, kind: Kind, cand: &Cand) -> Check {
+    fn vertical_check(&self, g: &[usize], t: usize, (rule, kind, axis): (Rule, Kind, &str), cand: &Cand) -> Check {
         let col = self.in_group(g, t).map_or(g[0], |(c, _)| c);
         let mut rows: Vec<(i8, usize, usize)> = cand.iter().map(|&(s, r)| (s, r, self.col_of(g, r))).collect();
         rows.sort_by_key(|&(_, r, _)| r);
@@ -640,7 +657,7 @@ impl<'a> Grid<'a> {
             }
             terms.push(Term { sign, table: self.table.index, rows: (r, r), cols: (c, c) });
         }
-        self.check(rule, kind, "v", (t, col), terms)
+        self.check(rule, kind, axis, (t, col), terms)
     }
 
     /// The column a row's figure sits in within a group; for a blank, the
@@ -695,9 +712,7 @@ impl<'a> Grid<'a> {
         if let Some((a, terms)) = relation(&row_keys) {
             let cand: Cand = terms.iter().map(|&i| (1, rows[i])).collect();
             for g in self.applicable(rows[a], &cand) {
-                let mut check = self.vertical_check(g, rows[a], Rule::Identity, Kind::Identity, &cand);
-                check.id = check.id.replacen("v:", "i:", 1);
-                out.checks.push(check);
+                out.checks.push(self.vertical_check(g, rows[a], (Rule::Identity, Kind::Identity, "i"), &cand));
             }
         }
         if self.groups.iter().any(|g| g.len() == 2) {
@@ -711,9 +726,7 @@ impl<'a> Grid<'a> {
         let Some((a, terms)) = relation(&col_keys) else { return Vec::new() };
         let cand: Cand = terms.iter().map(|&i| (1, cols[i])).collect();
         for r in self.applicable_rows(cols[a], &cand) {
-            let mut check = self.row_check(Rule::Identity, Kind::Identity, &cand, r, cols[a]);
-            check.id = check.id.replacen("h:", "i:", 1);
-            out.checks.push(check);
+            out.checks.push(self.row_check((Rule::Identity, Kind::Identity, "i"), &cand, r, cols[a]));
         }
         let mut explained = vec![cols[a]];
         explained.extend(terms.iter().map(|&i| cols[i]));
@@ -809,7 +822,7 @@ impl<'a> Grid<'a> {
     }
 
     /// A check across row `r`: column `target` = the signed columns in `cand`.
-    fn row_check(&self, rule: Rule, kind: Kind, cand: &Cand, r: usize, target: usize) -> Check {
+    fn row_check(&self, (rule, kind, axis): (Rule, Kind, &str), cand: &Cand, r: usize, target: usize) -> Check {
         let mut cols: Vec<(i8, usize)> = cand.clone();
         cols.sort_by_key(|&(_, c)| c);
         let mut terms: Vec<Term> = Vec::new();
@@ -823,7 +836,7 @@ impl<'a> Grid<'a> {
             }
             terms.push(Term { sign, table: self.table.index, rows: (r, r), cols: (c, c) });
         }
-        self.check(rule, kind, "h", (r, target), terms)
+        self.check(rule, kind, axis, (r, target), terms)
     }
 
     /// The header text directly above the first data row in column `c`.
@@ -842,7 +855,7 @@ impl<'a> Grid<'a> {
         for &(sign, c) in cand {
             match self.at(r, c) {
                 V::Num(x) => total += f64::from(sign) * x,
-                V::Text => return None,
+                V::Text | V::Missing => return None,
                 V::Blank | V::Covered => {}
             }
         }
@@ -888,7 +901,9 @@ impl<'a> Grid<'a> {
                 holding.iter().filter(|&&r| self.at(r, target) != V::Num(0.0) || nonzero(r, cand) > 0).count();
             if *strict {
                 let substantive = holding.iter().filter(|&&r| nonzero(r, cand) >= 2).count();
-                if holding.len() < 2 || holding.len() * 2 < rows.len() || substantive < 2 {
+                // More than half its rows, so a coincidence in some rows
+                // cannot assert a total that the others then fail.
+                if holding.len() < 2 || holding.len() * 2 <= rows.len() || substantive < 2 {
                     continue;
                 }
             }
@@ -900,7 +915,7 @@ impl<'a> Grid<'a> {
                 best = Some((score, i));
             }
         }
-        let emit = |rule: Rule, kind: Kind, cand: &Cand, r: usize| self.row_check(rule, kind, cand, r, target);
+        let emit = |rule: Rule, kind: Kind, cand: &Cand, r: usize| self.row_check((rule, kind, "h"), cand, r, target);
         if let Some((_, i)) = best {
             let (rule, kind, cand, _) = &cands[i];
             out.checks.extend(self.applicable_rows(target, cand).into_iter().map(|r| emit(*rule, *kind, cand, r)));
@@ -1284,6 +1299,8 @@ mod tests {
                 "v:T1.R5.C3 Movement Pass +R2-4C3-3",
                 "h:T2.R2.C5 ColumnMovement Pass +R2-2C2-3 -R2-2C4-4",
                 "h:T2.R3.C5 ColumnMovement Pass +R3-3C2-3 -R3-3C4-4",
+                // The current period opens with the prior period's closing.
+                "x:T1.R2.C2 PriorClosing Pass +R5-5C3-3",
             ],
             "a decrease shown without parentheses is subtracted by its label"
         );
@@ -1328,6 +1345,18 @@ mod tests {
             &[&["갑", "100", "1"], &["을", "200", "2"], &["합 계", "300", "-"]],
         ));
         assert_eq!(lines(&foot(&d)), ["v:T1.R4.C2 LabelTotal Pass +R2-3C2-2"]);
+    }
+
+    #[test]
+    fn a_position_no_cell_covers_is_never_summed() {
+        // The 병 row is one cell short: its C3 is not a blank the evaluator can read.
+        let d = doc(&table(
+            &["구 분", "당기", "전기"],
+            &[&["갑", "100", "80"], &["을", "200", "120"], &["병", "50"], &["합 계", "350", "200"]],
+        ));
+        let r = foot(&d);
+        assert_eq!(lines(&r), ["v:T1.R5.C2 LabelTotal Pass +R2-4C2-2"]);
+        assert!(r.checks.iter().all(|c| c.status != Status::NeedsJudgment));
     }
 
     #[test]

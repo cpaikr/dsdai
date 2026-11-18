@@ -270,7 +270,9 @@ fn xlsx(file: &Path, out: &Path, force: bool) -> Outcome {
 
 fn foot(file: &Path) -> Outcome {
     let doc = document(&read_archive(file)?)?;
-    json_ok(dsd::foot::foot(&doc))
+    let mut report = dsd::foot::foot(&doc);
+    let warnings = std::mem::take(&mut report.warnings).into_iter().map(Warning::from).collect();
+    Ok(Output::Json { result: serde_json::to_value(report).expect("results serialize"), warnings })
 }
 
 fn table(file: &Path, numbers: &[usize], spans: bool, format: Format) -> Outcome {

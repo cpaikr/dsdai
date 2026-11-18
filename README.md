@@ -40,10 +40,12 @@ DART Editor stays the authority for layout and filing.
   where Excel shows exactly the source text; each table's range is the
   defined name `DSD_T<n>`
 - **Foot:** `foot` proposes footing checks from labels (합계, 소계, 총계,
-  closing balances), numbered or indented hierarchy, statement layouts, and
-  the balance identity, and evaluates each one exactly: checks that pass or
-  fail, totals no structure explains (unresolved, with the closest
-  candidate), and totals with nothing to sum (uncovered)
+  closing balances), numbered or indented hierarchy, statement layouts, the
+  balance identity, statement lines against the notes they name, and
+  openings against prior closings, and evaluates each one exactly: checks
+  that pass or fail, totals no structure explains (unresolved, with the
+  closest candidate), statement amounts found for only some periods
+  (candidates), and what nothing covers (uncovered)
 - **Maintain:** `version [--check]`, `upgrade [--check]`
 
 Every command prints one JSON object to stdout,

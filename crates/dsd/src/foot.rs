@@ -58,13 +58,20 @@ pub enum Rule {
     /// A closing row is the opening row plus the movements between them, or
     /// an opening row repeats the closing row above it.
     Movement,
-    /// A column labelled as a total, or a table's last column, sums its row.
+    /// A column labelled as a total sums its row, or an unlabelled column
+    /// sums the columns left of it in more than half its rows.
     ColumnTotal,
     /// A closing column is the opening column plus the movement columns.
     ColumnMovement,
     /// 자산총계 = 부채와자본총계, or 부채총계 + 자본총계, wherever those lines
     /// meet in one table; asserted from the labels, so a failure is a finding.
     Identity,
+    /// A statement line's amounts are the same in a note it names, for both
+    /// periods.
+    StatementNote,
+    /// The current period's opening balance repeats the prior period's
+    /// closing balance (one table with both periods, or a pair of tables).
+    PriorClosing,
 }
 
 /// One cell, with the label it had when the check was written.
@@ -240,7 +247,8 @@ pub struct Footing {
     pub counts: Counts,
 }
 
-/// A labelled total with nothing to sum.
+/// A labelled total with nothing to sum, or a statement amount its notes do
+/// not show.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Uncovered {
@@ -256,18 +264,24 @@ pub struct ReportCounts {
     pub fail: usize,
     pub needs_judgment: usize,
     pub unresolved: usize,
+    pub candidates: usize,
     pub uncovered: usize,
 }
 
 /// Proposed checks with their results, the totals no structure explains
-/// (each with its closest candidate, evaluated), and the totals with nothing
-/// to sum.
+/// (each with its closest candidate, evaluated), statement amounts found in
+/// their notes for only some periods (candidates, evaluated), and what
+/// nothing could cover.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     pub checks: Vec<CheckResult>,
     pub unresolved: Vec<CheckResult>,
+    pub candidates: Vec<CheckResult>,
     pub uncovered: Vec<Uncovered>,
     pub counts: ReportCounts,
+    /// For the envelope's warnings, not the result.
+    #[serde(skip)]
+    pub warnings: Vec<crate::check::Issue>,
 }
 
 /// Propose every check the document's structure supports and evaluate them.
@@ -275,6 +289,7 @@ pub fn foot(doc: &Doc) -> Report {
     let proposals = propose(doc);
     let checks = evaluate(doc, &proposals.checks);
     let unresolved = evaluate(doc, &proposals.unresolved).checks;
+    let candidates = evaluate(doc, &proposals.candidates).checks;
     let uncovered: Vec<Uncovered> = proposals
         .uncovered
         .iter()
@@ -297,9 +312,10 @@ pub fn foot(doc: &Doc) -> Report {
         fail: checks.counts.fail,
         needs_judgment: checks.counts.needs_judgment,
         unresolved: unresolved.len(),
+        candidates: candidates.len(),
         uncovered: uncovered.len(),
     };
-    Report { checks: checks.checks, unresolved, uncovered, counts }
+    Report { checks: checks.checks, unresolved, candidates, uncovered, counts, warnings: proposals.warnings }
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +434,7 @@ fn read(doc: &Doc, t: usize, row: usize, col: usize) -> Result<Read, String> {
 }
 
 /// How to convert a value from table `from`'s unit to table `to`'s.
-fn scale(units: &[Option<Unit>], from: usize, to: usize) -> Result<f64, String> {
+pub(crate) fn scale(units: &[Option<Unit>], from: usize, to: usize) -> Result<f64, String> {
     if from == to {
         return Ok(1.0);
     }
@@ -528,7 +544,8 @@ pub fn row_label(doc: &Doc, table: &Table, row: usize) -> Option<String> {
 }
 
 /// The header cells above a column (`TH` rows from the top, joined with ` / `),
-/// or the first row's text when the table has no header cells.
+/// or the first row's text when the table has no header cells. A unit
+/// caption heading the whole table (`(단위: 원)`) is not part of a label.
 pub fn col_label(doc: &Doc, table: &Table, col: usize) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     for row in 1..=table.rows.len() {
@@ -538,12 +555,13 @@ pub fn col_label(doc: &Doc, table: &Table, col: usize) -> Option<String> {
         }
         if let Some(text) = cell_text(doc, table, row, col)
             && parts.last() != Some(&text)
+            && unit_in_text(&text).is_none()
         {
             parts.push(text);
         }
     }
     if parts.is_empty() {
-        return cell_text(doc, table, 1, col).filter(|t| amount::parse(t).is_none());
+        return cell_text(doc, table, 1, col).filter(|t| amount::parse(t).is_none() && unit_in_text(t).is_none());
     }
     Some(parts.join(" / "))
 }
@@ -711,6 +729,14 @@ mod tests {
         assert_eq!(unit("단위 없음이라는 문장"), None);
         assert_eq!(unit("(단위:원)"), Some(("원".into(), Some(1.0))));
         assert_eq!(unit("(금액: 원)"), None);
+    }
+
+    #[test]
+    fn a_unit_caption_row_is_not_part_of_a_column_label() {
+        let d = doc(
+            "<TABLE><COLGROUP><COL/><COL/></COLGROUP><THEAD><TR><TH COLSPAN=\"2\">(단위: 원)</TH></TR><TR><TH>구분</TH><TH>당기</TH></TR></THEAD><TBODY><TR><TD>현금</TD><TD>10</TD></TR></TBODY></TABLE>",
+        );
+        assert_eq!(col_label(&d, d.table(1).unwrap(), 2).as_deref(), Some("당기"));
     }
 
     #[test]

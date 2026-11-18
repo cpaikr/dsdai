@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1–2.2 done; 2.3 in progress: `dsd foot` and the in-table proposers are in. Next action: the statement ↔ note and prior-period proposers |
+| Phase 2 | 2.1–2.3 done. Next action: step 2.4 (checks file: schema, merge, validation, and re-application by labels) |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -508,11 +508,36 @@ Recorded during implementation:
   numbered breakdown that nothing explains is unresolved with the closest
   candidate; a breakdown implied only by indentation, a signed chain of
   statement lines, or an unlabelled total column is kept only when it holds
-  (chains and columns in every period, with two non-zero parts). A lone `-`
+  with two non-zero parts (a chain in every period, a column in more than
+  half its rows). A lone `-`
   under non-zero parts is a total left out, not a check. An opening row
   repeats the closing above it only across a year end.
-- **Check ids (2.3).** `v:` (down a column), `h:` (across a row), or `i:`
-  (the balance identity) with the target `T#.R#.C#`; a repeat gets `#2`.
+- **Check ids (2.3).** `v:` (down a column), `h:` (across a row), `i:` (the
+  balance identity), or `x:` (across tables or periods; a statement-note
+  check adds `/T#` of its note table) with the target `T#.R#.C#`; a repeat gets `#2`.
+- **Statement ↔ note (2.3).** A statement table is one the workbook model
+  puts on a statement sheet; a note's tables are those on its note sheet. A
+  line names its notes in a 주석 column or a `(주4)` label. Its amounts are
+  looked for in every figure cell of those notes' tables, converted between
+  known units; one note row holding both periods side by side is preferred,
+  then a row with the line's label, then a total row. Both periods found:
+  checks (auto), as settled. One period (including a line showing only
+  one): `candidates`, a new report list, evaluated but never errors. None,
+  while the note has tables: uncovered (`cross`). A note the document does
+  not hold is skipped; a workbook model that fails (an Excel limit) skips
+  the matching with a `statement-notes-skipped` warning.
+- **Prior closings (2.3).** Asserted, since an opening balance is the prior
+  closing: within a table with a current and a prior period column (named
+  by 당기/전기, or a statement's two columns in order), each top-level
+  opening row against the next closing row; across tables, a current and a
+  prior table with the same figure columns, named by their header or the
+  caption just before them (a unit caption between keeps the period), row
+  by row or column by column by label (a label repeated on either side, such
+  as two 소계 rows, is not paired). Within a table the two periods must be
+  named; two unnamed columns of a note are usually two items. A prior interim period (분기, 반기)
+  is never compared, since the next period opens from the prior year end.
+- **Column labels (2.3).** A unit caption heading the whole table is not
+  part of a column label (it had made every label start `(단위: 원) /`).
 - **Corpus (2.3).** Each proposer is measured on every private sample for
   pass, fail, unresolved, and uncovered counts; the counts are reported to the
   owner, not recorded here, since they derive from confidential documents.
@@ -528,8 +553,11 @@ Recorded during implementation:
   typing (plus footnote-marked amounts, which also change the workbook and
   `check.py`'s independent parse), per-check tolerance, unit detection and
   conversion, and labels stored beside coordinates.
-- [ ] 2.3 Proposers, one at a time, each measured on the private corpus for
-  pass / unresolved / uncovered counts.
+- [x] 2.3 Proposers, one at a time, each measured on the private corpus for
+  pass / unresolved / uncovered counts: `dsd foot` with label totals,
+  hierarchy (statement subtotal columns included), signed statement chains,
+  movements in rows and columns, total columns, the balance identity,
+  statement ↔ note, and prior closings.
 - [ ] 2.4 Checks file: schema, merge, validation errors, and re-application
   by coordinates verified by labels (moved and stale checks).
 - [ ] 2.5 Workbook rendering of checks and live counts.

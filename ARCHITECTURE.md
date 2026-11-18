@@ -33,7 +33,10 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   `rust_xlsxwriter` in [xlsx.rs](crates/dsd/src/xlsx.rs); and footing
   checks (the `target = Σ sign × term` model, units, and evaluation) in
   [foot.rs](crates/dsd/src/foot.rs), with the proposers that find them in
-  [foot/propose.rs](crates/dsd/src/foot/propose.rs).
+  [foot/propose.rs](crates/dsd/src/foot/propose.rs) (within a table) and
+  [foot/propose/cross.rs](crates/dsd/src/foot/propose/cross.rs) (statement
+  lines against their notes, which uses the workbook model's sheet
+  partition, and openings against prior closings).
   It has no network access and no process I/O.
 - [`crates/dsd-cli`](crates/dsd-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document. It alone contacts GitHub,

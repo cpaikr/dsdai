@@ -1780,7 +1780,7 @@ fn foot_proposes_checks_and_reports_unresolved_and_uncovered_totals() {
     let count = |status: &str| checks.iter().filter(|c| c["status"] == status).count();
     assert_eq!(
         r["counts"],
-        json!({"pass": count("pass"), "fail": 1, "needsJudgment": 0, "unresolved": 2, "uncovered": 2}),
+        json!({"pass": count("pass"), "fail": 1, "needsJudgment": 0, "unresolved": 2, "candidates": 0, "uncovered": 2}),
         "a failed check is a finding, not a failed command"
     );
 }
@@ -1789,4 +1789,67 @@ fn foot_proposes_checks_and_reports_unresolved_and_uncovered_totals() {
 fn foot_reports_a_missing_file() {
     let w = Work::new("foot-missing");
     dsd(["foot", &s(&w.path("absent.dsd"))]).fails("file_not_found");
+}
+
+/// The public fixture plus a statement naming notes 4 and 5, and those
+/// notes: one holds both periods, one only the current period, and note 5
+/// also has a 당기/전기 pair of movement tables.
+fn foot_cross_variant(w: &Work) -> std::path::PathBuf {
+    let row =
+        |cells: &[&str]| format!("<TR>{}</TR>", cells.iter().map(|c| format!("<TD>{c}</TD>")).collect::<String>());
+    let head =
+        |cells: &[&str]| format!("<TR>{}</TR>", cells.iter().map(|c| format!("<TH>{c}</TH>")).collect::<String>());
+    let table = |cols: usize, header: &[&str], rows: &[&[&str]]| {
+        format!(
+            "<TABLE BORDER=\"1\"><COLGROUP>{}</COLGROUP><THEAD>{}</THEAD><TBODY>{}</TBODY></TABLE>\r\n",
+            "<COL WIDTH=\"100\"></COL>".repeat(cols),
+            head(header),
+            rows.iter().map(|r| row(r)).collect::<String>()
+        )
+    };
+    let unit = "<P>(단위: 원)</P>\r\n";
+    let statement = format!(
+        "<TABLE BORDER=\"0\"><COLGROUP><COL WIDTH=\"600\"></COL></COLGROUP><TBODY><TR><TD>재 무 상 태 표</TD></TR></TBODY></TABLE>\r\n{unit}{}",
+        table(
+            4,
+            &["과 목", "주 석", "당 기", "전 기"],
+            &[&["현금", "4", "1,000", "900"], &["토지", "5", "300", "260"]]
+        )
+    );
+    let notes = format!(
+        "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>4. 현금</P>\r\n{unit}{}<P>5. 토지</P>\r\n<P>(1) 당기</P>\r\n{unit}{}<P>(2) 전기</P>\r\n{unit}{}</SECTION-2>\r\n",
+        table(3, &["구 분", "당기말", "전기말"], &[&["보통예금", "1,000", "900"]]),
+        table(4, &["구 분", "기초", "취득", "기말"], &[&["토지", "250", "50", "300"]]),
+        table(4, &["구 분", "기초", "취득", "기말"], &[&["토지", "200", "40", "240"]]),
+    );
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{statement}{notes}"));
+    w.variant("foot-cross.dsd", &xml)
+}
+
+#[test]
+fn foot_matches_statement_lines_with_their_notes_and_openings_with_prior_closings() {
+    let w = Work::new("foot-cross");
+    let r = dsd(["foot", &s(&foot_cross_variant(&w))]).ok();
+    let cross: Vec<(&str, &str, &str)> = r["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"].as_str().unwrap().starts_with("x:"))
+        .map(|c| (c["id"].as_str().unwrap(), c["rule"].as_str().unwrap(), c["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        cross,
+        [
+            // 현금: note 4 holds both periods.
+            ("x:T6.R2.C3/T7", "statement-note", "pass"),
+            ("x:T6.R2.C4/T7", "statement-note", "pass"),
+            // The current 토지 opens at 250; the prior table closes at 240.
+            ("x:T8.R2.C2", "prior-closing", "fail"),
+        ]
+    );
+    // 토지: note 5 shows the current amount (300) but not the prior one (260).
+    let candidates: Vec<&str> = r["candidates"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(candidates, ["x:T6.R3.C3/T8"]);
+    assert_eq!(r["candidates"][0]["terms"], json!([{"sign": 1, "table": 8, "row": 2, "col": 4}]));
+    assert_eq!(r["counts"]["candidates"], 1);
 }

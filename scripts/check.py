@@ -14,6 +14,7 @@ import json
 from collections import Counter
 from decimal import Decimal
 import os
+import math
 import re
 import subprocess
 import sys
@@ -421,11 +422,10 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
         return got[1] if got[0] == "n" else "text"
 
     disagreements = 0
-    checks = result["checks"] + result["unresolved"]
+    checks = result["checks"] + result["unresolved"] + result["candidates"]
     for check in checks:
         target = check["target"]
-        if any(term["table"] != target["table"] for term in check["terms"]):
-            continue  # cross-table terms convert units; covered by the CLI tests
+        cross = any(term["table"] != target["table"] for term in check["terms"])
         actual, expected, text = value(target["table"], target["row"], target["col"]), 0.0, False
         for term in check["terms"]:
             rows, cols = term.get("rows", [term.get("row")] * 2), term.get("cols", [term.get("col")] * 2)
@@ -435,7 +435,22 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
                     text |= got == "text"
                     expected += term["sign"] * got if isinstance(got, float) else 0.0
         if check["status"] == "needsJudgment":
-            ok = text or not isinstance(actual, float)
+            # Cross-table checks also need judgment when a unit is unknown.
+            ok = text or not isinstance(actual, float) or cross
+        elif cross:
+            # Units convert between tables: the CLI's sum is the workbook's
+            # times a power of ten, the ratio of two currency units.
+            ratio = check["expected"] / expected if expected else 1.0
+            power = round(math.log10(abs(ratio))) if ratio else 0
+            scaled = expected * 10.0**power
+            scale = max(1.0, abs(scaled), abs(actual or 0.0))
+            ok = (
+                not text
+                and isinstance(actual, float)
+                and abs(check["actual"] - actual) <= 1e-9 * scale
+                and abs(check["expected"] - scaled) <= 1e-9 * scale
+                and (check["status"] == "pass") == (abs(actual - scaled) <= check["allowed"] + 1e-9 * scale)
+            )
         else:
             scale = max(1.0, abs(expected), abs(actual or 0.0))
             holds = isinstance(actual, float) and abs(actual - expected) <= check["allowed"] + 1e-9 * scale
@@ -452,6 +467,7 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
     consistent = (
         (counts["pass"], counts["fail"], counts["needsJudgment"]) == (tally["pass"], tally["fail"], tally["needsJudgment"])
         and counts["unresolved"] == len(result["unresolved"])
+        and counts["candidates"] == len(result["candidates"])
         and counts["uncovered"] == len(result["uncovered"])
         and len({c["id"] for c in checks}) == len(checks)
     )
@@ -462,7 +478,8 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
     if not disagreements and consistent:
         print(
             f"ok   {label}: foot {counts['pass']} pass, {counts['fail']} fail, {counts['needsJudgment']} needing judgment, "
-            f"{counts['unresolved']} unresolved, {counts['uncovered']} uncovered; re-evaluated from the workbook"
+            f"{counts['unresolved']} unresolved, {counts['candidates']} candidates, {counts['uncovered']} uncovered; "
+            "re-evaluated from the workbook"
         )
 
 

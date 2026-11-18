@@ -127,19 +127,28 @@ period columns:
                    (kept only when it holds in every period)
   movement         closing = opening + movements; an opening repeats the
                    closing above it
-  column-total     a total column, or a last column that sums its row in most
-                   rows
+  column-total     a total column, or an unlabelled column that sums the
+                   columns left of it in more than half its rows
   column-movement  closing column = opening column + movement columns
+  identity         자산총계 = 부채와자본총계 (or 부채총계 + 자본총계)
+  statement-note   a statement line's amounts appear in a note it names
+                   (its 주석 column or a (주4) label), for both periods
+  prior-closing    the current period opens with the prior period's closing,
+                   in one table or across a 당기/전기 pair of tables
 
-result.checks lists each check with its terms and status (pass, fail, or
-needsJudgment with a reason). A check passes only when its difference is 0.
+Check ids are v: (down a column), h: (across a row), i: (identity), or x:
+(across tables or periods) plus the target T#.R#.C#. result.checks lists each check
+with its terms and status (pass, fail, or needsJudgment with a reason). A
+check passes only when its difference is 0.
 Values are read as `dsd xlsx` types them; a blank or a lone - is 0. Note
 reference columns (주석) are never summed. Tables in different units convert
 when both captions name a currency unit (원, 천원, 백만원, 억원, 십억원).
 
 result.unresolved lists labelled totals no structure explains, each with its
 closest candidate evaluated: a request for judgment, not an error.
-result.uncovered lists labelled totals with nothing to sum.";
+result.candidates lists statement amounts found in their notes for one
+period only (including lines that show one period). result.uncovered lists labelled totals with nothing to sum and
+statement amounts their notes do not show.";
 
 const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
 sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
