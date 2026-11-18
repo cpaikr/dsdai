@@ -206,10 +206,23 @@ def read_workbook(path: Path) -> tuple[dict, dict]:
     return sheets, names
 
 
+FOOTNOTES = re.compile(r"^(?P<figure>.*?)(?P<markers>(?:\s*\((?:\*(?:[0-9]+(?:,[0-9]+)*)?|주[0-9]+(?:,[0-9]+)*)\))+)$")
+
+
 def figure(text: str):
     """The number and number format a table text should become, derived
-    independently of the CLI; None when it must stay text."""
+    independently of the CLI; None when it must stay text. Footnote markers
+    after a figure become a literal at the end of every format section."""
     t = text.strip()
+    m = FOOTNOTES.match(t)
+    if m and m["figure"].strip() and m["figure"].strip() != "-":
+        plain = figure(m["figure"].strip())
+        if plain is None:
+            return None
+        value, fmt = plain
+        return value, ";".join(f'{section}"{m["markers"]}"' for section in fmt.split(";"))
+    if m and m["figure"].strip() == "-":
+        return None
     if t == "-":
         return 0.0, '#,##0;-#,##0;"-"'
     m = FIGURE.match(t)

@@ -1024,11 +1024,11 @@ mod tests {
                 number(2025.0, "0"),
                 number(0.0, "#,##0;-#,##0;\"-\""),
                 number(0.125, "0.0%"),
-                Some(Value::Text("1,234 (*1)".into())),
+                number(1234.0, "#,##0\" (*1)\""),
                 None,
             ]
         );
-        assert_eq!((wb.counts.number_cells, wb.counts.text_cells), (5, 2));
+        assert_eq!((wb.counts.number_cells, wb.counts.text_cells), (6, 1));
     }
 
     #[test]

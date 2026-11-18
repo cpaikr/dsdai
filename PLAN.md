@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1 done (decisions settled 2026-11-18). Next action: step 2.2 |
+| Phase 2 | 2.1–2.2 done. Next action: step 2.3 (proposers, and the `dsd foot` command that runs them) |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -281,13 +281,14 @@ stays text, exactly as `dsd table` reports it, including leading spaces.
 | `12.50` | 12.5 | decimals kept (`#,##0.00` / `0.00`) |
 | `12.5%` | 0.125 | `0.0%` |
 | `-` alone | 0 | displays `-` |
+| `1,234 (*1)`, `500(주2)` | 1234 | marker kept as a literal: `#,##0" (*1)"` (since 2.2) |
 
 Kept as text: invalid grouping (`5,6,32`), leading zeros, more than 15
-significant digits, an explicit `+`, a number with a footnote marker or any
+significant digits, an explicit `+`, a marker before the figure or any
 other text, dates, and empty cells (left empty). Numbers are right-aligned.
 
-Footnote-marked amounts (`1,234 (*1)`) stay text in Phase 1. Phase 2 needs
-them as numbers; decide there whether to carry the marker in the format.
+Footnote-marked amounts (`1,234 (*1)`) stayed text in Phase 1. Since step
+2.2 they are numbers whose format carries the marker (see Phase 2 decisions).
 
 ### Provenance
 
@@ -470,10 +471,31 @@ reports differences; it changes figures only when asked.
   for the same labels nearby and reports the check as moved or stale instead
   of evaluating the wrong cells.
 
+Recorded during implementation:
+
+- **2.2 scope.** The model and evaluator live in `crates/dsd/src/foot.rs`
+  as a library API; the `dsd foot` command arrives with the first proposer
+  (2.3), when a run has checks to report.
+- **Evaluation rules (2.2).** A blank cell counts as 0 in a sum; a nil dash
+  is 0; a text cell in a term, a blank target, or a cell outside its table
+  makes the check need judgment, with a reason naming the cell. A spanning
+  cell covering several positions of a term is summed once. A per-term
+  tolerance allows that amount for every cell the terms sum. Differences
+  within 10⁻⁹ of the larger value (binary rounding of decimals) pass.
+- **Units (2.2).** A table's unit is its own caption, else the caption in
+  the block just before it (a unit line, or a small caption table, which is
+  how statements and notes carry it); a caption names its unit after a colon
+  (`단위:`). Currency units convert (원, 천원, 백만원, 억원, 십억원); other
+  units (주, 명, USD) compare only with the same unit. On the corpus, 0 to 6
+  tables per sample hold figures of 1,000 or more without a detected unit.
+- **Labels (2.2).** A row's label is its first text that is not a figure;
+  a column's is its header cells (`TH` rows from the top) joined with ` / `,
+  else the first row's text.
+
 ### Steps (outline)
 
 - [x] 2.1 Settle the open decisions with the owner.
-- [ ] 2.2 Check model, evaluation, and the JSON result: `T/R/C` terms
+- [x] 2.2 Check model, evaluation, and the JSON result: `T/R/C` terms
   resolved through the Phase 1 placements, values read with the Phase 1
   typing (plus footnote-marked amounts, which also change the workbook and
   `check.py`'s independent parse), per-check tolerance, unit detection and

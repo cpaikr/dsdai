@@ -126,8 +126,9 @@ Each sheet has its title in row 1 and a link back to 총괄표 in row 2; content
 starts in row 4, one row per text line. Table cells keep their grid: spans
 become merged cells, TH cells are shaded, and a grey T# marker sits right of
 each table's first row. A cell becomes a number only when Excel shows exactly
-its text (1,234 / (1,234) / △1,234 / 12.5% / a lone - as zero); anything else,
-such as 5,6,32 or 1,234 (*1), stays text as `dsd table` reports it.
+its text (1,234 / (1,234) / △1,234 / 12.5% / a lone - as zero; a footnote
+marker such as 1,234 (*1) stays visible through the number format); anything
+else, such as 5,6,32, stays text as `dsd table` reports it.
 
 Each table's range is the defined name DSD_T<n>, and result.tables maps T# to
 its sheet and range, so cell (R, C) of T<n> is R-1 rows down and C-1 columns

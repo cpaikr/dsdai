@@ -30,7 +30,9 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   workbook model (sheet partition, layout, and the `T#` ↔ cell mapping) in
   [sheets.rs](crates/dsd/src/sheets.rs), cell typing in
   [amount.rs](crates/dsd/src/amount.rs), and serialization with
-  `rust_xlsxwriter` in [xlsx.rs](crates/dsd/src/xlsx.rs).
+  `rust_xlsxwriter` in [xlsx.rs](crates/dsd/src/xlsx.rs); and footing
+  checks (the `target = Σ sign × term` model, units, and evaluation) in
+  [foot.rs](crates/dsd/src/foot.rs).
   It has no network access and no process I/O.
 - [`crates/dsd-cli`](crates/dsd-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document. It alone contacts GitHub,

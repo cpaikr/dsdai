@@ -1614,7 +1614,7 @@ fn xlsx_exports_sheets_typed_cells_merges_and_names() {
     assert_eq!(at(4, 2), Some(Data::Float(0.0)));
     assert_eq!(at(5, 2), Some(Data::String("5,6,32".into())), "a note-number list stays text");
     assert_eq!(at(6, 2), Some(Data::Float(2025.0)));
-    assert_eq!(at(7, 2), Some(Data::String("1,234 (*1)".into())));
+    assert_eq!(at(7, 2), Some(Data::Float(1234.0)), "a footnoted amount is a number");
     assert_eq!(at(8, 2), Some(Data::Float(0.125)));
     assert_eq!(range.get_value((row, col + 2)), Some(&Data::String("T6".into())), "marker beside the first row");
     let statement = book.worksheet_range("손익계산서").unwrap();

@@ -41,7 +41,8 @@ section, one per statement (`재무상태표`, …), and inside a notes region o
 note (`주석1`, …); a statement-named table inside a note stays there. Tables
 keep their grid with spans merged; a cell is a number only when Excel shows
 exactly its text (`(1,234)` and `△1,234` are negative, a lone `-` is zero), so
-note-number lists like `5,6,32` and footnoted amounts stay text.
+note-number lists like `5,6,32` stay text; a footnoted amount (`1,234 (*1)`)
+is a number whose format shows the marker.
 `result.tables` gives each table's sheet and range (also the defined name
 `DSD_T<n>`): cell `R#`/`C#` of a table is R-1 rows down and C-1 columns right
 of the range's first cell, so a figure found in the workbook maps back to
