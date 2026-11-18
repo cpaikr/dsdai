@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1–2.2 done. Next action: step 2.3 (proposers, and the `dsd foot` command that runs them) |
+| Phase 2 | 2.1–2.2 done; 2.3 in progress: `dsd foot` and the in-table proposers are in. Next action: the statement ↔ note and prior-period proposers |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -486,11 +486,39 @@ Recorded during implementation:
   the block just before it (a unit line, or a small caption table, which is
   how statements and notes carry it); a caption names its unit after a colon
   (`단위:`). Currency units convert (원, 천원, 백만원, 억원, 십억원); other
-  units (주, 명, USD) compare only with the same unit. On the corpus, 0 to 6
-  tables per sample hold figures of 1,000 or more without a detected unit.
+  units (주, 명, USD) compare only with the same unit. Some corpus tables
+  with figures have no detected unit, so their cross-table checks need
+  judgment.
 - **Labels (2.2).** A row's label is its first text that is not a figure;
   a column's is its header cells (`TH` rows from the top) joined with ` / `,
   else the first row's text.
+
+- **In-table proposers (2.3).** Each table is read as figures by period
+  group: one figure column, or a statement's detail/subtotal pair (two
+  adjacent columns under one heading spanning exactly them, never both
+  non-zero in a row). Columns of note references (`주석`), rates (`…율`,
+  `…률`), prices, averages, issue numbers, dates, and percentages are never
+  summed. A row's level is its pair column, then its numbering
+  (Ⅰ. > 1. > 가. > (1) > ① > (가)), then indentation.
+- **Choosing a structure (2.3).** A target gets candidate structures in a
+  fixed order and keeps the one holding in the most period groups, counting
+  only groups where something is non-zero; the structure is then applied to
+  every group, so a difference in one period fails instead of hiding. A
+  labelled total (합계, 소계, 총계, `… 계`, a top-level closing balance) or a
+  numbered breakdown that nothing explains is unresolved with the closest
+  candidate; a breakdown implied only by indentation, a signed chain of
+  statement lines, or an unlabelled total column is kept only when it holds
+  (chains and columns in every period, with two non-zero parts). A lone `-`
+  under non-zero parts is a total left out, not a check. An opening row
+  repeats the closing above it only across a year end.
+- **Check ids (2.3).** `v:` (down a column), `h:` (across a row), or `i:`
+  (the balance identity) with the target `T#.R#.C#`; a repeat gets `#2`.
+- **Corpus (2.3).** Each proposer is measured on every private sample for
+  pass, fail, unresolved, and uncovered counts; the counts are reported to the
+  owner, not recorded here, since they derive from confidential documents.
+  Remaining failures are rounding in tables in larger units and differences
+  the documents carry; `check.py` re-evaluates every check from the exported
+  workbook.
 
 ### Steps (outline)
 

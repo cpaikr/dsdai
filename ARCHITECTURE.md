@@ -32,7 +32,8 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   [amount.rs](crates/dsd/src/amount.rs), and serialization with
   `rust_xlsxwriter` in [xlsx.rs](crates/dsd/src/xlsx.rs); and footing
   checks (the `target = Σ sign × term` model, units, and evaluation) in
-  [foot.rs](crates/dsd/src/foot.rs).
+  [foot.rs](crates/dsd/src/foot.rs), with the proposers that find them in
+  [foot/propose.rs](crates/dsd/src/foot/propose.rs).
   It has no network access and no process I/O.
 - [`crates/dsd-cli`](crates/dsd-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document. It alone contacts GitHub,
@@ -114,7 +115,8 @@ Contract version 1 (`metadata.contract`):
   ElementTree extraction, requires byte-identical extract/pack, and rereads
   each `xlsx` export with the standard library: every table cell against
   `table`, every text line against an independent extraction, and
-  byte-identical reruns.
+  byte-identical reruns; and re-evaluates every check `foot` proposes from
+  that workbook's typed cells.
 - The Rust implementation replaced a Python helper. Before cutover a parity
   harness matched its text views, check results, edit outputs, and diffs on
   the public fixture and the private corpus; both live in the history before

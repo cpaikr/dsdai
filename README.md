@@ -39,6 +39,11 @@ DART Editor stays the authority for layout and filing.
   with every table on its grid (spans merged) and figures as numbers only
   where Excel shows exactly the source text; each table's range is the
   defined name `DSD_T<n>`
+- **Foot:** `foot` proposes footing checks from labels (합계, 소계, 총계,
+  closing balances), numbered or indented hierarchy, statement layouts, and
+  the balance identity, and evaluates each one exactly: checks that pass or
+  fail, totals no structure explains (unresolved, with the closest
+  candidate), and totals with nothing to sum (uncovered)
 - **Maintain:** `version [--check]`, `upgrade [--check]`
 
 Every command prints one JSON object to stdout,
@@ -56,6 +61,7 @@ dsd check report_수정.dsd --against report.dsd
 dsd diff report.dsd report_수정.dsd --format text
 dsd compare filed.dsd draft.dsd --format html -o compare.html
 dsd xlsx report.dsd -o report.xlsx
+dsd foot report.dsd
 ```
 
 Schema validation reads the DART schema installed with DART Editor
@@ -73,8 +79,9 @@ python scripts/check.py
 Validates the skill package, runs `cargo fmt`, `clippy`, and the Rust tests
 (with the test-only `fixture-origin` feature for release-check and upgrade
 tests), the release tooling's unit tests, and a CLI smoke run (check, complete
-read, outline, byte-identical extract/pack, and an xlsx export reread cell by
-cell and line by line) over the public fixture and, when
+read, outline, byte-identical extract/pack, an xlsx export reread cell by
+cell and line by line, and every proposed footing check re-evaluated from that
+workbook) over the public fixture and, when
 `fixtures/private/` exists, each private sample without printing document
 content. Building needs Rust 1.88 or newer; `cargo build --release -p dsd-cli`
 produces `target/release/dsd`.

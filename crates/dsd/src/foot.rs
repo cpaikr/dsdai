@@ -11,8 +11,11 @@
 //! different units are converted when both units are known from their
 //! captions; otherwise the check needs judgment instead of being evaluated.
 
+mod propose;
+
 use std::collections::HashSet;
 
+pub use propose::{Proposals, propose};
 use serde::{Deserialize, Serialize};
 
 use crate::amount;
@@ -39,6 +42,29 @@ pub enum Kind {
 pub enum Origin {
     Auto,
     Agent,
+}
+
+/// Which proposer stated an automatic check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Rule {
+    /// A row labelled 합계, 소계, 총계, or 계 sums the rows above it.
+    LabelTotal,
+    /// A numbered or indented line sums the lines under it (a statement's
+    /// subtotal column over its detail column included).
+    Hierarchy,
+    /// A statement line is a signed sum of the sibling lines above it.
+    SignedSum,
+    /// A closing row is the opening row plus the movements between them, or
+    /// an opening row repeats the closing row above it.
+    Movement,
+    /// A column labelled as a total, or a table's last column, sums its row.
+    ColumnTotal,
+    /// A closing column is the opening column plus the movement columns.
+    ColumnMovement,
+    /// 자산총계 = 부채와자본총계, or 부채총계 + 자본총계, wherever those lines
+    /// meet in one table; asserted from the labels, so a failure is a finding.
+    Identity,
 }
 
 /// One cell, with the label it had when the check was written.
@@ -130,6 +156,9 @@ pub struct Check {
     pub id: String,
     pub kind: Kind,
     pub origin: Origin,
+    /// The proposer behind an automatic check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<Rule>,
     pub target: CellRef,
     pub terms: Vec<Term>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -170,8 +199,11 @@ pub struct CheckResult {
     pub id: String,
     pub kind: Kind,
     pub origin: Origin,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<Rule>,
     pub status: Status,
     pub target: Located,
+    pub terms: Vec<Term>,
     /// The target's value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual: Option<f64>,
@@ -208,6 +240,68 @@ pub struct Footing {
     pub counts: Counts,
 }
 
+/// A labelled total with nothing to sum.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Uncovered {
+    pub kind: Kind,
+    #[serde(flatten)]
+    pub cell: Located,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReportCounts {
+    pub pass: usize,
+    pub fail: usize,
+    pub needs_judgment: usize,
+    pub unresolved: usize,
+    pub uncovered: usize,
+}
+
+/// Proposed checks with their results, the totals no structure explains
+/// (each with its closest candidate, evaluated), and the totals with nothing
+/// to sum.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Report {
+    pub checks: Vec<CheckResult>,
+    pub unresolved: Vec<CheckResult>,
+    pub uncovered: Vec<Uncovered>,
+    pub counts: ReportCounts,
+}
+
+/// Propose every check the document's structure supports and evaluate them.
+pub fn foot(doc: &Doc) -> Report {
+    let proposals = propose(doc);
+    let checks = evaluate(doc, &proposals.checks);
+    let unresolved = evaluate(doc, &proposals.unresolved).checks;
+    let uncovered: Vec<Uncovered> = proposals
+        .uncovered
+        .iter()
+        .map(|&(kind, t, row, col)| {
+            let table = &doc.tables[t - 1];
+            Uncovered {
+                kind,
+                cell: Located {
+                    table: t,
+                    row,
+                    col,
+                    row_label: row_label(doc, table, row),
+                    col_label: col_label(doc, table, col),
+                },
+            }
+        })
+        .collect();
+    let counts = ReportCounts {
+        pass: checks.counts.pass,
+        fail: checks.counts.fail,
+        needs_judgment: checks.counts.needs_judgment,
+        unresolved: unresolved.len(),
+        uncovered: uncovered.len(),
+    };
+    Report { checks: checks.checks, unresolved, uncovered, counts }
+}
+
 // ---------------------------------------------------------------------------
 // evaluation
 
@@ -232,8 +326,10 @@ fn evaluate_one(doc: &Doc, units: &[Option<Unit>], check: &Check) -> CheckResult
         id: check.id.clone(),
         kind: check.kind,
         origin: check.origin,
+        rule: check.rule,
         status: Status::NeedsJudgment,
         target: Located { table: t.table, row: t.row, col: t.col, row_label: None, col_label: None },
+        terms: check.terms.clone(),
         actual: None,
         expected: None,
         difference: None,
@@ -493,6 +589,7 @@ mod tests {
             id: id.to_owned(),
             kind: Kind::Vertical,
             origin: Origin::Agent,
+            rule: None,
             target: CellRef { table: target.0, row: target.1, col: target.2, label: None },
             terms,
             tolerance: None,

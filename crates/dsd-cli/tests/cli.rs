@@ -1718,3 +1718,75 @@ fn xlsx_exports_unverified_content_with_a_warning() {
     let range = book.worksheet_range("재무상태표").unwrap();
     assert!(range.cells().any(|(_, _, d)| d == &Data::String("새 요소 글".into())));
 }
+
+/// The public fixture plus a note table whose prior-period total is off by
+/// 10, a total nothing explains, and a total with nothing above it.
+fn foot_variant(w: &Work) -> std::path::PathBuf {
+    let note = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH><TH>전 기</TH></TR></THEAD><TBODY>\
+<TR><TD>합 계</TD><TD>5</TD><TD>5</TD></TR>\
+<TR><TD>예금</TD><TD>100</TD><TD>80</TD></TR>\
+<TR><TD>현금</TD><TD>20</TD><TD>10</TD></TR>\
+<TR><TD>합 계</TD><TD>120</TD><TD>100</TD></TR>\
+<TR><TD>기타</TD><TD>7</TD><TD>7</TD></TR>\
+<TR><TD>총 계</TD><TD>1,000</TD><TD>1,000</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    w.variant("foot.dsd", &xml)
+}
+
+#[test]
+fn foot_proposes_checks_and_reports_unresolved_and_uncovered_totals() {
+    let w = Work::new("foot");
+    let src = foot_variant(&w);
+    let run = dsd(["foot", &s(&src)]);
+    let r = run.ok();
+    assert!(run.stderr.is_empty());
+    let checks = r["checks"].as_array().unwrap();
+    // The fixture's balance sheet: a subtotal over its detail lines.
+    let first = &checks[0];
+    assert_eq!(
+        (first["id"].as_str(), first["rule"].as_str(), first["status"].as_str()),
+        (Some("v:T3.R3.C2"), Some("hierarchy"), Some("pass"))
+    );
+    assert_eq!(first["terms"], json!([{"sign": 1, "table": 3, "rows": [4, 5], "col": 2}]));
+    assert_eq!(first["target"]["rowLabel"], "Ⅰ.유동자산");
+    // The note: 합계 holds in the current period, so the prior period's
+    // difference is a finding, with the table's unit.
+    let note = |id: &str| checks.iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("{id}: {checks:?}"));
+    let current = note("v:T5.R5.C2");
+    assert_eq!((current["status"].as_str(), current["unit"].as_str()), (Some("pass"), Some("원")));
+    let prior = note("v:T5.R5.C3");
+    assert_eq!((prior["status"].as_str(), prior["difference"].as_f64()), (Some("fail"), Some(10.0)));
+    assert_eq!(prior["terms"], json!([{"sign": 1, "table": 5, "rows": [3, 4], "col": 3}]));
+    // 총계 matches nothing: unresolved, with its closest candidate evaluated.
+    let unresolved: Vec<(&str, &str)> = r["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["id"].as_str().unwrap(), c["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(unresolved, [("v:T5.R7.C2", "fail"), ("v:T5.R7.C3", "fail")]);
+    // The first 합계 has nothing above it.
+    let uncovered: Vec<(u64, u64)> = r["uncovered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| (u["row"].as_u64().unwrap(), u["col"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(uncovered, [(2, 2), (2, 3)]);
+    assert_eq!(r["uncovered"][0]["kind"], "vertical");
+    let count = |status: &str| checks.iter().filter(|c| c["status"] == status).count();
+    assert_eq!(
+        r["counts"],
+        json!({"pass": count("pass"), "fail": 1, "needsJudgment": 0, "unresolved": 2, "uncovered": 2}),
+        "a failed check is a finding, not a failed command"
+    );
+}
+
+#[test]
+fn foot_reports_a_missing_file() {
+    let w = Work::new("foot-missing");
+    dsd(["foot", &s(&w.path("absent.dsd"))]).fails("file_not_found");
+}

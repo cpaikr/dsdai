@@ -63,6 +63,7 @@ pub fn run(command: Command) -> Outcome {
             compare(&base, &other, format, output.as_deref(), force, all, limit)
         }
         Command::Xlsx { file, output, force } => xlsx(&file, &output, force),
+        Command::Foot { file } => foot(&file),
         Command::Diff { original, edited, limit, raw, format } => diff(&original, &edited, limit, raw, format.format),
         Command::SetCell { file, write, target, col, text, unit_value, flatten } => {
             let src = read_archive(&file)?;
@@ -265,6 +266,11 @@ fn xlsx(file: &Path, out: &Path, force: bool) -> Outcome {
         "counts": model.counts,
     });
     Ok(Output::Json { result, warnings: model.warnings.into_iter().map(Warning::from).collect() })
+}
+
+fn foot(file: &Path) -> Outcome {
+    let doc = document(&read_archive(file)?)?;
+    json_ok(dsd::foot::foot(&doc))
 }
 
 fn table(file: &Path, numbers: &[usize], spans: bool, format: Format) -> Outcome {

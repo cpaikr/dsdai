@@ -18,6 +18,7 @@ Typical flow:
   6. dsd check out.dsd --against report.dsd && dsd diff report.dsd out.dsd
   7. dsd compare filed.dsd draft.dsd --format html -o compare.html
   8. dsd xlsx report.dsd -o report.xlsx      statements, notes, tables as a workbook
+  9. dsd foot report.dsd                     proposed footing checks and results
 
 Output:
   Commands print one JSON object to stdout: {ok, command, result, warnings,
@@ -115,6 +116,30 @@ together, with changed cells and, within text, the changed characters
 highlighted, a change map, a section index, next/previous navigation (n/p), a
 changes-only filter, and a panel listing the selected item's changes (i). The report is one self-contained file
 with no external resources; it needs -o.";
+
+const FOOT_AFTER: &str = "Every check is target = Σ sign × term over T/R/C cells. Proposers find
+cells that should be totals and keep the structure that holds in the most
+period columns:
+  label-total      a row labelled 합계, 소계, 총계, or 계 sums the rows above
+  hierarchy        a numbered or indented line sums the lines under it,
+                   including a statement's subtotal column over its detail one
+  signed-sum       a statement line is a signed sum of the lines above it
+                   (kept only when it holds in every period)
+  movement         closing = opening + movements; an opening repeats the
+                   closing above it
+  column-total     a total column, or a last column that sums its row in most
+                   rows
+  column-movement  closing column = opening column + movement columns
+
+result.checks lists each check with its terms and status (pass, fail, or
+needsJudgment with a reason). A check passes only when its difference is 0.
+Values are read as `dsd xlsx` types them; a blank or a lone - is 0. Note
+reference columns (주석) are never summed. Tables in different units convert
+when both captions name a currency unit (원, 천원, 백만원, 억원, 십억원).
+
+result.unresolved lists labelled totals no structure explains, each with its
+closest candidate evaluated: a request for judgment, not an error.
+result.uncovered lists labelled totals with nothing to sum.";
 
 const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
 sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
@@ -260,6 +285,9 @@ C:\\DART\\Resource\\Dtd when present; without one it reports schema-skipped.")]
         #[arg(long)]
         force: bool,
     },
+    /// Propose footing checks from labels, hierarchy, and layout, and evaluate them.
+    #[command(after_help = FOOT_AFTER)]
+    Foot { file: PathBuf },
     /// Changed cells and text blocks between two .dsd files, then raw line and member changes.
     Diff {
         original: PathBuf,
@@ -507,6 +535,7 @@ impl Command {
             Self::Check { .. } => "check",
             Self::Compare { .. } => "compare",
             Self::Xlsx { .. } => "xlsx",
+            Self::Foot { .. } => "foot",
             Self::Diff { .. } => "diff",
             Self::SetCell { .. } => "set-cell",
             Self::Replace { .. } => "replace",

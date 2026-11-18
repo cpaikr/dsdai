@@ -400,6 +400,70 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
             f"ok   {label}: xlsx {c['sheets']} sheets, {c['tables']} tables, {c['numberCells']} number and "
             f"{c['textCells']} text cells, {sum(expected.values())} text lines, {containers} nested-table container(s)"
         )
+    foot_smoke(label, src, sheets, names)
+
+
+def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
+    """Re-evaluate every proposed check from the exported workbook's cells,
+    independently of the CLI's arithmetic: same-table terms summed from the
+    typed cells, statuses and differences compared. Prints counts only."""
+    envelope = dsd("foot", str(src))
+    if not envelope["ok"]:
+        fail(f"{label}: `foot` failed with {envelope['error']['code']}")
+        return
+    result = envelope["result"]
+
+    def value(table: int, row: int, col: int):
+        sheet, (top, left), _ = names[f"DSD_T{table}"]
+        got = sheets[sheet].get((top + row - 1, left + col - 1))
+        if got is None or got == ("s", ""):
+            return None
+        return got[1] if got[0] == "n" else "text"
+
+    disagreements = 0
+    checks = result["checks"] + result["unresolved"]
+    for check in checks:
+        target = check["target"]
+        if any(term["table"] != target["table"] for term in check["terms"]):
+            continue  # cross-table terms convert units; covered by the CLI tests
+        actual, expected, text = value(target["table"], target["row"], target["col"]), 0.0, False
+        for term in check["terms"]:
+            rows, cols = term.get("rows", [term.get("row")] * 2), term.get("cols", [term.get("col")] * 2)
+            for row in range(rows[0], rows[1] + 1):
+                for col in range(cols[0], cols[1] + 1):
+                    got = value(term["table"], row, col)
+                    text |= got == "text"
+                    expected += term["sign"] * got if isinstance(got, float) else 0.0
+        if check["status"] == "needsJudgment":
+            ok = text or not isinstance(actual, float)
+        else:
+            scale = max(1.0, abs(expected), abs(actual or 0.0))
+            holds = isinstance(actual, float) and abs(actual - expected) <= check["allowed"] + 1e-9 * scale
+            ok = (
+                not text
+                and isinstance(actual, float)
+                and abs(check["actual"] - actual) <= 1e-9 * scale
+                and abs(check["expected"] - expected) <= 1e-9 * scale
+                and (check["status"] == "pass") == holds
+            )
+        disagreements += not ok
+    counts = result["counts"]
+    tally = Counter(c["status"] for c in result["checks"])
+    consistent = (
+        (counts["pass"], counts["fail"], counts["needsJudgment"]) == (tally["pass"], tally["fail"], tally["needsJudgment"])
+        and counts["unresolved"] == len(result["unresolved"])
+        and counts["uncovered"] == len(result["uncovered"])
+        and len({c["id"] for c in checks}) == len(checks)
+    )
+    if disagreements:
+        fail(f"{label}: foot disagrees with the workbook on {disagreements} check(s)")
+    if not consistent:
+        fail(f"{label}: foot counts or ids are inconsistent")
+    if not disagreements and consistent:
+        print(
+            f"ok   {label}: foot {counts['pass']} pass, {counts['fail']} fail, {counts['needsJudgment']} needing judgment, "
+            f"{counts['unresolved']} unresolved, {counts['uncovered']} uncovered; re-evaluated from the workbook"
+        )
 
 
 def corpus_smoke() -> None:
