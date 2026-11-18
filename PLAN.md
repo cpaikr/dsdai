@@ -16,9 +16,9 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 
 | Item | State |
 |---|---|
-| Branch | `feat/xlsx-export`, open as PR #18 (review threads resolved, CI green). Next action: owner merges it |
+| Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | Not started. Next action: step 2.1 (settle the open decisions with the owner) |
+| Phase 2 | 2.1 done (decisions settled 2026-11-18). Next action: step 2.2 |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -449,24 +449,39 @@ uncovered → inspect tables → write the overlay → rerun → report true
 differences with `T/R/C` and amounts) linked from `SKILL.md`. The agent
 reports differences; it changes figures only when asked.
 
-### Open decisions (settle at Phase 2 start)
+### Decisions (settled with the owner, 2026-11-18)
 
-- Rounding tolerance for documents in thousands or millions: zero, a fixed
-  ±1 per term, or stated per check.
-- Unit conversion in cross checks between tables in different units.
-- How far statement ↔ note matches are asserted automatically versus offered
-  as candidates.
-- Footnote-marked amounts as numbers (see Phase 1 cell typing).
-- Whether a checks file from one draft is re-applied to the next by
-  coordinates, by labels, or both; and the exact overlay schema.
+- **Tolerance:** a check passes only when its difference is exactly 0. A
+  check may state its own tolerance (for example ±1 per term in a document
+  in thousands), so every allowance is explicit and shown with the result.
+- **Units:** the CLI reads each table's unit from its caption
+  (`(단위: 원)`, `천원`, `백만원`, in the table or the line just before it)
+  and converts before comparing tables in different units. A check whose
+  unit cannot be determined is reported as needing judgment, not evaluated.
+- **Statement ↔ note:** when a named note holds the same amount for both
+  periods, the CLI records an auto check that passes. Anything else is
+  offered as a candidate for the agent, never reported as an error.
+- **Footnote-marked amounts:** `1,234 (*1)` becomes the number 1234 with a
+  number format that shows the marker (`#,##0" (*1)"`), so the cell still
+  reads exactly as the source and formulas can use it. This changes Phase 1
+  output for those cells; the display-fidelity rule is unchanged.
+- **Re-applying a checks file:** a check finds its cells by `T/R/C` first and
+  verifies the stored labels there. When they no longer match, the CLI looks
+  for the same labels nearby and reports the check as moved or stale instead
+  of evaluating the wrong cells.
 
 ### Steps (outline)
 
-- [ ] 2.1 Settle the open decisions with the owner.
-- [ ] 2.2 Check model, evaluation, and the JSON result.
+- [x] 2.1 Settle the open decisions with the owner.
+- [ ] 2.2 Check model, evaluation, and the JSON result: `T/R/C` terms
+  resolved through the Phase 1 placements, values read with the Phase 1
+  typing (plus footnote-marked amounts, which also change the workbook and
+  `check.py`'s independent parse), per-check tolerance, unit detection and
+  conversion, and labels stored beside coordinates.
 - [ ] 2.3 Proposers, one at a time, each measured on the private corpus for
   pass / unresolved / uncovered counts.
-- [ ] 2.4 Checks file: schema, merge, validation errors.
+- [ ] 2.4 Checks file: schema, merge, validation errors, and re-application
+  by coordinates verified by labels (moved and stale checks).
 - [ ] 2.5 Workbook rendering of checks and live counts.
 - [ ] 2.6 Skill reference, evals, and docs.
 - [ ] 2.7 Gate: on the working sample, the false positives the reference
