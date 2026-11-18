@@ -17,6 +17,7 @@ Typical flow:
   5. dsd set-cell report.dsd -o out.dsd --table 3 --row 4 --col 2 --text 1,100
   6. dsd check out.dsd --against report.dsd && dsd diff report.dsd out.dsd
   7. dsd compare filed.dsd draft.dsd --format html -o compare.html
+  8. dsd xlsx report.dsd -o report.xlsx      statements, notes, tables as a workbook
 
 Output:
   Commands print one JSON object to stdout: {ok, command, result, warnings,
@@ -114,6 +115,25 @@ together, with changed cells and, within text, the changed characters
 highlighted, a change map, a section index, next/previous navigation (n/p), a
 changes-only filter, and a panel listing the selected item's changes (i). The report is one self-contained file
 with no external resources; it needs -o.";
+
+const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
+sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
+first cell names one, such as 재무상태표), and inside a 주석 region one per note
+(주석1, 주석2, ...); a statement-named table inside a note stays on the note. Content outside every region goes to 본문. Sheet names are
+made valid and unique; result.sheets keeps each full title.
+
+Each sheet has its title in row 1 and a link back to 총괄표 in row 2; content
+starts in row 4, one row per text line. Table cells keep their grid: spans
+become merged cells, TH cells are shaded, and a grey T# marker sits right of
+each table's first row. A cell becomes a number only when Excel shows exactly
+its text (1,234 / (1,234) / △1,234 / 12.5% / a lone - as zero); anything else,
+such as 5,6,32 or 1,234 (*1), stays text as `dsd table` reports it.
+
+Each table's range is the defined name DSD_T<n>, and result.tables maps T# to
+its sheet and range, so cell (R, C) of T<n> is R-1 rows down and C-1 columns
+right of the range's first cell. Images are not embedded; a row names them.
+The same input always yields the same bytes (result.sha256). The workbook is
+output only: change the document with the edit commands and export again.";
 
 const STRUCTURE_AFTER: &str = "\
 Copies join every span they lie inside: copying a row that sits under a
@@ -227,6 +247,17 @@ C:\\DART\\Resource\\Dtd when present; without one it reports schema-skipped.")]
         /// List at most this many items (JSON and text).
         #[arg(long, default_value_t = 500)]
         limit: usize,
+    },
+    /// Export statements, notes, and every table to an .xlsx workbook for reading and footing.
+    #[command(after_help = XLSX_AFTER)]
+    Xlsx {
+        file: PathBuf,
+        /// The .xlsx path to write; stdout carries a summary envelope.
+        #[arg(short, long, value_name = "OUT")]
+        output: PathBuf,
+        /// Replace an existing output file (never the source .dsd).
+        #[arg(long)]
+        force: bool,
     },
     /// Changed cells and text blocks between two .dsd files, then raw line and member changes.
     Diff {
@@ -474,6 +505,7 @@ impl Command {
             Self::Find { .. } => "find",
             Self::Check { .. } => "check",
             Self::Compare { .. } => "compare",
+            Self::Xlsx { .. } => "xlsx",
             Self::Diff { .. } => "diff",
             Self::SetCell { .. } => "set-cell",
             Self::Replace { .. } => "replace",

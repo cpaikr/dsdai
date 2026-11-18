@@ -25,8 +25,12 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   ([edit.rs](crates/dsd/src/edit.rs)), structural row, column, table, and
   paragraph edits ([structure.rs](crates/dsd/src/structure.rs)), block diffs
   ([diff.rs](crates/dsd/src/diff.rs), [difflib.rs](crates/dsd/src/difflib.rs)),
-  and content-aligned comparison with its reports
-  ([compare.rs](crates/dsd/src/compare.rs)).
+  content-aligned comparison with its reports
+  ([compare.rs](crates/dsd/src/compare.rs)), and the xlsx export: the
+  workbook model (sheet partition, layout, and the `T#` ↔ cell mapping) in
+  [sheets.rs](crates/dsd/src/sheets.rs), cell typing in
+  [amount.rs](crates/dsd/src/amount.rs), and serialization with
+  `rust_xlsxwriter` in [xlsx.rs](crates/dsd/src/xlsx.rs).
   It has no network access and no process I/O.
 - [`crates/dsd-cli`](crates/dsd-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document. It alone contacts GitHub,
@@ -48,8 +52,12 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   the output is re-read and its replaced members compared before success is
   reported. Outputs never replace an existing file or the input without
   `--force`, and are written through a synced temporary file and a rename.
-  Views and reports (`read -o`, `compare -o`) never replace a source
-  document, even with `--force`.
+  Views, reports, and exports (`read -o`, `compare -o`, `xlsx -o`) never
+  replace a source document, even with `--force`.
+- **Reproducible export.** `xlsx` output depends only on the document: the
+  workbook's creation time is pinned and nothing iterates in hash order, so
+  the same input yields the same bytes. The workbook is output only; nothing
+  is read back from it.
 - **Structural consistency.** Structural edits keep every row covering every
   column: copies join the spans they lie inside, deletions shrink them (a
   spanning cell moves down when its anchor row goes), and `HEIGHT`/`WIDTH`
@@ -77,7 +85,8 @@ Contract version 1 (`metadata.contract`):
   `{ok, command, result, warnings, error, metadata}`, or plain text for help,
   `--version`, and successful `--format text` views. Failures are always
   JSON. Output a command writes to a file (`read -o`, `compare -o`, including
-  the HTML report) leaves stdout to a summary envelope.
+  the HTML report, and the `xlsx` workbook) leaves stdout to a summary
+  envelope.
 - Exit 0 means `ok: true`; 1 is an execution failure with a stable
   `error.code` (`file_not_found`, `invalid_archive`, `invalid_xml`,
   `invalid_argument`, `text_not_found`, `count_mismatch`, `edit_refused`,
@@ -100,7 +109,10 @@ Contract version 1 (`metadata.contract`):
   the private schemas exist, checks the schema-equivalence claims.
 - [`scripts/check.py`](scripts/check.py) runs everything above plus a CLI
   smoke run over the private corpus that compares `read` with an independent
-  ElementTree extraction and requires byte-identical extract/pack.
+  ElementTree extraction, requires byte-identical extract/pack, and rereads
+  each `xlsx` export with the standard library: every table cell against
+  `table`, every text line against an independent extraction, and
+  byte-identical reruns.
 - The Rust implementation replaced a Python helper. Before cutover a parity
   harness matched its text views, check results, edit outputs, and diffs on
   the public fixture and the private corpus; both live in the history before

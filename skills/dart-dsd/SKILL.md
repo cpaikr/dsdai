@@ -1,6 +1,6 @@
 ---
 name: dart-dsd
-description: "Read, review, and edit Korean DART Editor .dsd documents (감사보고서, 검토보고서, 사업·분기·반기보고서 drafts) without corrupting them, using the dsd CLI. Use when a task involves a .dsd file: converting it to Markdown, finding or comparing figures, comparing two versions side by side, rolling a report forward to a new period, updating table cells or text, adding or removing rows, columns, tables, or paragraphs, or verifying an edited .dsd before it returns to DART Editor. Not for .drt submission packages, OpenDART API downloads, or operating the DART Editor GUI."
+description: "Read, review, and edit Korean DART Editor .dsd documents (감사보고서, 검토보고서, 사업·분기·반기보고서 drafts) without corrupting them, using the dsd CLI. Use when a task involves a .dsd file: converting it to Markdown or exporting it to Excel, finding or comparing figures, comparing two versions side by side, rolling a report forward to a new period, updating table cells or text, adding or removing rows, columns, tables, or paragraphs, or verifying an edited .dsd before it returns to DART Editor. Not for .drt submission packages, OpenDART API downloads, or operating the DART Editor GUI."
 ---
 
 # DART DSD
@@ -45,8 +45,9 @@ failures stay JSON.
 
 ## Route the task
 
-- Reading, converting, finding, or comparing (including a draft against a
-  filed or colleague's version): read [reading](references/reading.md).
+- Reading, converting, exporting to Excel, finding, or comparing (including a
+  draft against a filed or colleague's version): read
+  [reading](references/reading.md).
 - Changing a document: read [editing](references/editing.md); it ends with the
   verification every edit needs.
 - Content the views flag as unverified, a hand edit of `contents.xml`, or a

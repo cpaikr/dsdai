@@ -6,6 +6,7 @@
 //! replace exact byte ranges located by a positioned parser, and archives are
 //! rewritten with their original member layout.
 
+pub mod amount;
 pub mod archive;
 pub mod check;
 pub mod compare;
@@ -15,9 +16,11 @@ pub mod doc;
 pub mod edit;
 mod error;
 pub mod schema;
+pub mod sheets;
 pub mod structure;
 pub mod text;
 pub mod views;
+pub mod xlsx;
 pub mod xml;
 
 pub use archive::{Archive, read_archive};

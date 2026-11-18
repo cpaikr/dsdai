@@ -1509,3 +1509,212 @@ fn malformed_xml_declarations_are_refused() {
     let v = w.variant("decl.dsd", &w.contents().replacen("<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<?xml?>", 1));
     assert!(dsd(["check", &s(&v), "--no-schema"]).stdout.contains("contents-xml"));
 }
+
+// ---------------------------------------------------------------------------
+// xlsx
+
+/// The fixture plus a statement title table and a notes region with a
+/// heading after a line break and a nested table.
+fn xlsx_variant(w: &Work) -> std::path::PathBuf {
+    let statement = "<TABLE BORDER=\"0\"><COLGROUP><COL WIDTH=\"600\"></COL></COLGROUP><TBODY><TR><TD>손 익 계 산 서</TD></TR></TBODY></TABLE>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>과 목</TH><TH>제 5 기</TH></TR></THEAD><TBODY>\
+<TR><TD>매출액</TD><TD>(1,234)</TD></TR>\
+<TR><TD>매출원가</TD><TD>△500</TD></TR>\
+<TR><TD>기타</TD><TD>-</TD></TR>\
+<TR><TD>주석</TD><TD>5,6,32</TD></TR>\
+<TR><TD>연도</TD><TD>2025</TD></TR>\
+<TR><TD>표시</TD><TD>1,234 (*1)</TD></TR>\
+<TR><TD>비율</TD><TD>12.5%</TD></TR>\
+</TBODY></TABLE>\r\n";
+    let notes = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>1. 일반사항</P>\r\n<P>회사는 설립되었습니다.&amp;cr;2. 금융상품</P>\r\n\
+<TABLE><COLGROUP><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL></COLGROUP><TBODY><TR><TD>바깥</TD><TD><P>위</P>\
+<TABLE><COLGROUP><COL WIDTH=\"80\"></COL></COLGROUP><TBODY><TR><TD>1,000</TD></TR></TBODY></TABLE></TD></TR></TBODY></TABLE>\r\n\
+</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{statement}{notes}"));
+    w.variant("xlsx.dsd", &xml)
+}
+
+fn open_xlsx(path: &std::path::Path) -> calamine::Xlsx<std::io::BufReader<std::fs::File>> {
+    calamine::open_workbook(path).unwrap()
+}
+
+/// (row, col) of grid cell (R, C) of a table, from its envelope entry.
+fn grid_origin(entry: &Value) -> (String, u32, u32) {
+    let range = entry["range"].as_str().unwrap();
+    let first = range.split(':').next().unwrap();
+    let letters: String = first.chars().take_while(char::is_ascii_uppercase).collect();
+    let row: u32 = first[letters.len()..].parse().unwrap();
+    let col = letters.bytes().fold(0u32, |n, b| n * 26 + u32::from(b - b'A' + 1));
+    (entry["sheet"].as_str().unwrap().to_owned(), row - 1, col - 1)
+}
+
+#[test]
+fn xlsx_exports_sheets_typed_cells_merges_and_names() {
+    use calamine::{Data, Reader};
+    let w = Work::new("xlsx");
+    let src = xlsx_variant(&w);
+    let out = w.path("out.xlsx");
+    let run = dsd(["xlsx", &s(&src), "-o", &s(&out)]);
+    let r = run.ok();
+    assert!(run.stderr.is_empty());
+    let sheets: Vec<(&str, &str)> = r["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["name"].as_str().unwrap(), s["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        sheets,
+        [
+            ("총괄표", "index"),
+            ("표지", "cover"),
+            ("독립된 감사인의 감사보고서", "section"),
+            ("(첨부)재 무 제 표", "section"),
+            ("재무상태표", "statement"),
+            ("손익계산서", "statement"),
+            ("주 석", "section"),
+            ("주석1", "note"),
+            ("주석2", "note"),
+        ]
+    );
+    assert_eq!(r["sheets"][8]["title"], "2. 금융상품");
+    assert_eq!(r["counts"]["tables"], 8);
+    assert_eq!(r["counts"]["sheets"], 9);
+    let bytes = std::fs::read(&out).unwrap();
+    assert_eq!(r["bytes"], bytes.len());
+    assert_eq!(r["sha256"].as_str().unwrap().len(), 64);
+    let tables = r["tables"].as_array().unwrap();
+    assert_eq!(tables.iter().map(|t| t["table"].as_u64().unwrap()).collect::<Vec<_>>(), (1..=8).collect::<Vec<_>>());
+    assert_eq!(tables[5]["sheet"], "손익계산서");
+    assert_eq!(tables[5]["name"], "DSD_T6");
+
+    let mut book = open_xlsx(&out);
+    assert_eq!(book.sheet_names(), sheets.iter().map(|s| s.0.to_owned()).collect::<Vec<_>>());
+    // Defined names locate each table.
+    let names = book.defined_names().to_vec();
+    let t6 = names.iter().find(|(n, _)| n == "DSD_T6").unwrap();
+    let absolute: Vec<String> = tables[5]["range"]
+        .as_str()
+        .unwrap()
+        .split(':')
+        .map(|a| {
+            let letters: String = a.chars().take_while(char::is_ascii_uppercase).collect();
+            format!("${letters}${}", &a[letters.len()..])
+        })
+        .collect();
+    assert_eq!(t6.1, format!("'손익계산서'!{}", absolute.join(":")));
+    // Typed cells of T6, by the envelope's mapping.
+    let (sheet, row, col) = grid_origin(&tables[5]);
+    let range = book.worksheet_range(&sheet).unwrap();
+    let at = |r: u32, c: u32| range.get_value((row + r - 1, col + c - 1)).cloned();
+    assert_eq!(at(1, 1), Some(Data::String("과 목".into())));
+    assert_eq!(at(2, 2), Some(Data::Float(-1234.0)));
+    assert_eq!(at(3, 2), Some(Data::Float(-500.0)));
+    assert_eq!(at(4, 2), Some(Data::Float(0.0)));
+    assert_eq!(at(5, 2), Some(Data::String("5,6,32".into())), "a note-number list stays text");
+    assert_eq!(at(6, 2), Some(Data::Float(2025.0)));
+    assert_eq!(at(7, 2), Some(Data::String("1,234 (*1)".into())));
+    assert_eq!(at(8, 2), Some(Data::Float(0.125)));
+    assert_eq!(range.get_value((row, col + 2)), Some(&Data::String("T6".into())), "marker beside the first row");
+    let statement = book.worksheet_range("손익계산서").unwrap();
+    assert_eq!(statement.get_value((0, 0)), Some(&Data::String("손익계산서".into())));
+    assert_eq!(statement.get_value((1, 0)), Some(&Data::String("총괄표".into())));
+    // Spans of the fixture's T4 become merged ranges at the mapped origin.
+    let (sheet, row, col) = grid_origin(&tables[3]);
+    let merges: Vec<((u32, u32), (u32, u32))> =
+        book.merge_cells_by_sheet_name(&sheet).unwrap().iter().map(|d| (d.start, d.end)).collect();
+    assert!(merges.contains(&((row, col), (row + 1, col))), "ROWSPAN=2: {merges:?}");
+    assert!(merges.contains(&((row, col + 1), (row, col + 2))), "COLSPAN=2: {merges:?}");
+    // The heading after a line break opened 주석2; the nested table follows its container.
+    let note2 = book.worksheet_range("주석2").unwrap();
+    assert_eq!(note2.get_value((3, 0)), Some(&Data::String("2. 금융상품".into())));
+    let (_, row, col) = grid_origin(&tables[6]);
+    assert_eq!(note2.get_value((row, col + 1)), Some(&Data::String("위\n[표]".into())));
+    let (sheet, row, col) = grid_origin(&tables[7]);
+    assert_eq!(sheet, "주석2");
+    assert_eq!(note2.get_value((row, col)), Some(&Data::Float(1000.0)));
+    assert_eq!(
+        book.worksheet_range("주석1").unwrap().get_value((4, 0)),
+        Some(&Data::String("회사는 설립되었습니다.".into()))
+    );
+    // The index links every sheet.
+    let index = book.worksheet_range("총괄표").unwrap();
+    assert_eq!(index.get_value((3, 0)), Some(&Data::String("표지".into())));
+    assert_eq!(index.get_value((10, 1)), Some(&Data::String("주석".into())));
+    assert_eq!(index.get_value((10, 2)), Some(&Data::String("2. 금융상품".into())));
+}
+
+#[test]
+fn xlsx_output_is_byte_identical_across_runs() {
+    let w = Work::new("xlsx-repeat");
+    let src = xlsx_variant(&w);
+    let (a, b) = (w.path("a.xlsx"), w.path("b.xlsx"));
+    let ra = dsd(["xlsx", &s(&src), "-o", &s(&a)]).ok();
+    let rb = dsd(["xlsx", &s(&src), "-o", &s(&b)]).ok();
+    assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+    assert_eq!(ra["sha256"], rb["sha256"]);
+}
+
+#[test]
+fn xlsx_guards_its_output() {
+    let w = Work::new("xlsx-guard");
+    let out = w.path("out.xlsx");
+    dsd(["xlsx", &s(&w.src()), "-o", &s(&out)]).ok();
+    let first = std::fs::read(&out).unwrap();
+    dsd(["xlsx", &s(&w.src()), "-o", &s(&out)]).fails("output_exists");
+    dsd(["xlsx", &s(&w.src()), "-o", &s(&out), "--force"]).ok();
+    assert_eq!(std::fs::read(&out).unwrap(), first);
+    let source = std::fs::read(w.src()).unwrap();
+    dsd(["xlsx", &s(&w.src()), "-o", &s(&w.src())]).fails("output_exists");
+    let forced = dsd(["xlsx", &s(&w.src()), "-o", &s(&w.src()), "--force"]);
+    forced.fails("output_exists");
+    assert!(forced.error_text().contains("source .dsd"));
+    assert_eq!(std::fs::read(w.src()).unwrap(), source, "the source is never replaced");
+    dsd(["xlsx", &s(&w.src()), "-o", "-"]).fails("invalid_argument");
+    dsd(["xlsx", &s(&w.path("missing.dsd")), "-o", &s(&w.path("x.xlsx"))]).fails("file_not_found");
+    std::fs::write(w.path("bad.dsd"), b"not a zip").unwrap();
+    dsd(["xlsx", &s(&w.path("bad.dsd")), "-o", &s(&w.path("y.xlsx"))]).fails("invalid_archive");
+    dsd(["xlsx", &s(&w.src())]).fails("invalid_invocation");
+    assert!(!w.path("x.xlsx").exists() && !w.path("y.xlsx").exists());
+    let leftovers: Vec<_> = std::fs::read_dir(&w.dir)
+        .unwrap()
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| std::path::Path::new(n).extension().is_some_and(|e| e.eq_ignore_ascii_case("tmp")))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+#[test]
+fn xlsx_places_a_paragraph_table_after_its_own_note_heading() {
+    use calamine::{Data, Reader};
+    let w = Work::new("xlsx-slot");
+    // A literal [표] before a note heading must not take the table that follows the heading.
+    let notes = "<SECTION-2><TITLE>주석</TITLE>\r\n<P>1. 일반사항</P>\r\n<P>[표]&amp;cr;2. 리스\
+<TABLE><COLGROUP><COL WIDTH=\"100\"></COL></COLGROUP><TBODY><TR><TD>리스 표</TD></TR></TBODY></TABLE></P>\r\n</SECTION-2>\r\n";
+    let src = w.variant("slot.dsd", &replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{notes}")));
+    let out = w.path("out.xlsx");
+    let r = dsd(["xlsx", &s(&src), "-o", &s(&out)]).ok();
+    let last = r["tables"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!((last["table"].as_u64(), last["sheet"].as_str()), (Some(5), Some("주석2")));
+    let mut book = open_xlsx(&out);
+    let note1 = book.worksheet_range("주석1").unwrap();
+    assert_eq!(note1.get_value((4, 0)), Some(&Data::String("[표]".into())), "the literal mark stays as text");
+}
+
+#[test]
+fn xlsx_exports_unverified_content_with_a_warning() {
+    use calamine::{Data, Reader};
+    let w = Work::new("xlsx-unverified");
+    let xml = replace_once(&w.contents(), "<P>1. 일반사항</P>", "<NEWTHING><P>새 요소 글</P></NEWTHING>");
+    let src = w.variant("unverified.dsd", &xml);
+    let out = w.path("out.xlsx");
+    let v = dsd(["xlsx", &s(&src), "-o", &s(&out)]).json();
+    assert_eq!(v["ok"], true);
+    let codes: Vec<&str> = v["warnings"].as_array().unwrap().iter().map(|w| w["code"].as_str().unwrap()).collect();
+    assert_eq!(codes, ["unverified-element"]);
+    assert!(v["warnings"][0]["message"].as_str().unwrap().contains("<NEWTHING>"));
+    let mut book = open_xlsx(&out);
+    let range = book.worksheet_range("재무상태표").unwrap();
+    assert!(range.cells().any(|(_, _, d)| d == &Data::String("새 요소 글".into())));
+}
