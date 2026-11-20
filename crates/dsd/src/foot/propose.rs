@@ -681,7 +681,14 @@ impl<'a> Grid<'a> {
             kind,
             origin: Origin::Auto,
             rule: Some(rule),
-            target: CellRef { table: t, row, col, label },
+            target: CellRef {
+                table: t,
+                row,
+                col,
+                row_label: label,
+                col_label: col_label(self.doc, self.table, col),
+                section: None,
+            },
             terms,
             tolerance: None,
             note: None,
@@ -936,7 +943,7 @@ impl<'a> Grid<'a> {
 
 /// A label reduced to its words: no numbering, spaces, or trailing
 /// parenthetical (`Ⅲ. 자 산 총 계` → `자산총계`).
-fn key(label: &str) -> String {
+pub(super) fn key(label: &str) -> String {
     bare(label).trim_start_matches(|c: char| !is_hangul(c)).to_owned()
 }
 
@@ -1116,38 +1123,8 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
+    use crate::foot::testing::{doc, table};
     use crate::foot::{Report, Status, foot};
-
-    fn doc(body: &str) -> Doc {
-        let xml = format!(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DOCUMENT xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"dart4.xsd\"><BODY>{body}</BODY></DOCUMENT>"
-        );
-        Doc::parse(xml.into_bytes()).unwrap()
-    }
-
-    /// A table: header cells (`text` or `text|colspan`), then rows of cells,
-    /// where a cell `text|n` spans n columns.
-    fn table(header: &[&str], rows: &[&[&str]]) -> String {
-        let cell = |tag: &str, text: &str| match text.rsplit_once('|') {
-            Some((t, n)) => format!("<{tag} COLSPAN=\"{n}\">{t}</{tag}>"),
-            None => format!("<{tag}>{text}</{tag}>"),
-        };
-        let width: usize = header.iter().map(|h| h.rsplit_once('|').map_or(1, |(_, n)| n.parse().unwrap())).sum();
-        let mut t = format!("<TABLE><COLGROUP>{}</COLGROUP><THEAD><TR>", "<COL/>".repeat(width));
-        for h in header {
-            t.push_str(&cell("TH", h));
-        }
-        t.push_str("</TR></THEAD><TBODY>");
-        for row in rows {
-            t.push_str("<TR>");
-            for c in *row {
-                t.push_str(&cell("TD", c));
-            }
-            t.push_str("</TR>");
-        }
-        t.push_str("</TBODY></TABLE>");
-        t
-    }
 
     /// Each check as `id rule status terms`, for compact assertions.
     fn lines(report: &Report) -> Vec<String> {

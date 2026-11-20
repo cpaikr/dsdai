@@ -45,7 +45,9 @@ DART Editor stays the authority for layout and filing.
   openings against prior closings, and evaluates each one exactly: checks
   that pass or fail, totals no structure explains (unresolved, with the
   closest candidate), statement amounts found for only some periods
-  (candidates), and what nothing covers (uncovered)
+  (candidates), and what nothing covers (uncovered). `--checks FILE` applies
+  an agent's decisions (added, replaced, and dismissed checks), each verified
+  by its labels before it applies, so a file can be re-applied to a later draft
 - **Maintain:** `version [--check]`, `upgrade [--check]`
 
 Every command prints one JSON object to stdout,
@@ -64,6 +66,7 @@ dsd diff report.dsd report_수정.dsd --format text
 dsd compare filed.dsd draft.dsd --format html -o compare.html
 dsd xlsx report.dsd -o report.xlsx
 dsd foot report.dsd
+dsd foot report.dsd --checks checks.json
 ```
 
 Schema validation reads the DART schema installed with DART Editor
@@ -82,8 +85,8 @@ Validates the skill package, runs `cargo fmt`, `clippy`, and the Rust tests
 (with the test-only `fixture-origin` feature for release-check and upgrade
 tests), the release tooling's unit tests, and a CLI smoke run (check, complete
 read, outline, byte-identical extract/pack, an xlsx export reread cell by
-cell and line by line, and every proposed footing check re-evaluated from that
-workbook) over the public fixture and, when
+cell and line by line, every proposed footing check re-evaluated from that
+workbook, and a checks file re-stating proposals applied in place) over the public fixture and, when
 `fixtures/private/` exists, each private sample without printing document
 content. Building needs Rust 1.88 or newer; `cargo build --release -p dsd-cli`
 produces `target/release/dsd`.

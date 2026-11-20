@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1–2.3 done. Next action: step 2.4 (checks file: schema, merge, validation, and re-application by labels) |
+| Phase 2 | 2.1–2.4 done. Next action: step 2.5 (workbook rendering of checks and live counts) |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -393,7 +393,7 @@ Every check is `target = Σ sign × term`, over cells addressed by `T/R/C`:
   "id": "T13.R3.C4",
   "kind": "vertical | horizontal | movement | cross | identity",
   "origin": "auto | agent",
-  "target": {"table": 13, "row": 3, "col": 4, "label": "…"},
+  "target": {"table": 13, "row": 3, "col": 4, "rowLabel": "…", "colLabel": "…"},
   "terms": [{"sign": 1, "table": 13, "rows": [4, 8], "col": 3}],
   "note": "why this relation holds (agent checks)"
 }
@@ -536,6 +536,35 @@ Recorded during implementation:
   as two 소계 rows, is not paired). Within a table the two periods must be
   named; two unnamed columns of a note are usually two items. A prior interim period (분기, 반기)
   is never compared, since the next period opens from the prior year end.
+- **Checks file (2.4).** `dsd foot FILE --checks CHECKS` reads
+  `{"checks": [...], "dismiss": [...]}` (both optional, nothing else). A
+  check needs `origin: "agent"`, a `note`, at least one term, and no `rule`;
+  it replaces the proposal with its id at its target (an unresolved total
+  or a candidate included; a replaced check keeps its place) or else adds a
+  check. A `#2` id names the second proposal at one cell in emission order. A dismissal is `{id, target, reason}` and removes the proposal with
+  that id at that target, listed in `result.dismissed`. Ids are unique across
+  the file. A file that is not a JSON object, has unknown fields, or breaks
+  these rules fails with `invalid_argument` naming the entry
+  (`checks[2] (a:1): ...`); an unreadable file is `io_error`. An agent check
+  on an uncovered cell covers it.
+- **Re-application (2.4).** Targets carry `rowLabel`, `colLabel`, and
+  `section`, the title of the workbook sheet the table is on (`재무상태표`,
+  `4. 현금및현금성자산`), which anchors the table: note tables share generic
+  labels, so labels alone let an inserted table capture an entry. This is
+  the model's `CellRef`, also the shape of every result target, so an agent
+  copies a target from a result. Labels and sections compare without
+  spacing and one leading list marker (`Ⅰ.`, `1.`, `(1)`, `가.`), so a
+  renumbered note still matches, but otherwise exactly (`2024년` ≠ `2025년`,
+  `(원화)` ≠ `(외화)`); an unstated label or section matches anything. An
+  entry applies when its labels and section are at its `T/R/C`. Otherwise
+  it is `moved` with `found` when they are at exactly one other cell (in its
+  section, else within three tables), and `stale` with a reason when they
+  are nowhere or at several cells; both list what the stated cell holds now
+  (`there`) and neither applies, so the proposal it targeted stands. A
+  dismissal whose proposal is gone is stale too. Limits: two tables with the
+  same labels in one section can trade places unseen, and only the target
+  is verified, so a row inserted inside a term's range changes the sum
+  (which shows as a failure).
 - **Column labels (2.3).** A unit caption heading the whole table is not
   part of a column label (it had made every label start `(단위: 원) /`).
 - **Corpus (2.3).** Each proposer is measured on every private sample for
@@ -558,7 +587,7 @@ Recorded during implementation:
   hierarchy (statement subtotal columns included), signed statement chains,
   movements in rows and columns, total columns, the balance identity,
   statement ↔ note, and prior closings.
-- [ ] 2.4 Checks file: schema, merge, validation errors, and re-application
+- [x] 2.4 Checks file: schema, merge, validation errors, and re-application
   by coordinates verified by labels (moved and stale checks).
 - [ ] 2.5 Workbook rendering of checks and live counts.
 - [ ] 2.6 Skill reference, evals, and docs.

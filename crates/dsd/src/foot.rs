@@ -11,10 +11,12 @@
 //! different units are converted when both units are known from their
 //! captions; otherwise the check needs judgment instead of being evaluated.
 
+mod overlay;
 mod propose;
 
 use std::collections::HashSet;
 
+pub use overlay::{ChecksFile, Dismissal, Dismissed, Entry, Unapplied};
 pub use propose::{Proposals, propose};
 use serde::{Deserialize, Serialize};
 
@@ -74,7 +76,11 @@ pub enum Rule {
     PriorClosing,
 }
 
-/// One cell, with the label it had when the check was written.
+/// One cell by `T/R/C`, with its row's account name, its column's header
+/// text, and the section its table is in (the workbook sheet's title, such
+/// as `재무상태표` or `4. 현금및현금성자산`). In a result they are the
+/// document's labels now; in a checks file they are the labels an entry was
+/// written against, verified before it applies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CellRef {
@@ -82,7 +88,28 @@ pub struct CellRef {
     pub row: usize,
     pub col: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub row_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub col_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<String>,
+}
+
+impl CellRef {
+    /// The cell with the document's current labels; none for a cell the
+    /// document does not have.
+    pub(crate) fn at(doc: &Doc, ctx: &Context, table: usize, row: usize, col: usize) -> Self {
+        let (row_label, col_label) = match doc.table(table) {
+            Ok(t) if doc.cell_at(t, row, col).is_ok() => (row_label(doc, t, row), col_label(doc, t, col)),
+            _ => (None, None),
+        };
+        let section = ctx.sections.get(table.wrapping_sub(1)).cloned().flatten();
+        Self { table, row, col, row_label, col_label, section }
+    }
+
+    pub fn position(&self) -> (usize, usize, usize) {
+        (self.table, self.row, self.col)
+    }
 }
 
 /// A signed sum over a rectangle of cells in one table (1-based, inclusive).
@@ -187,19 +214,6 @@ pub enum Status {
     NeedsJudgment,
 }
 
-/// A cell as the document has it now.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Located {
-    pub table: usize,
-    pub row: usize,
-    pub col: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub row_label: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub col_label: Option<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckResult {
@@ -209,7 +223,7 @@ pub struct CheckResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rule: Option<Rule>,
     pub status: Status,
-    pub target: Located,
+    pub target: CellRef,
     pub terms: Vec<Term>,
     /// The target's value.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -254,7 +268,7 @@ pub struct Footing {
 pub struct Uncovered {
     pub kind: Kind,
     #[serde(flatten)]
-    pub cell: Located,
+    pub cell: CellRef,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -266,18 +280,25 @@ pub struct ReportCounts {
     pub unresolved: usize,
     pub candidates: usize,
     pub uncovered: usize,
+    pub dismissed: usize,
+    pub moved: usize,
+    pub stale: usize,
 }
 
-/// Proposed checks with their results, the totals no structure explains
-/// (each with its closest candidate, evaluated), statement amounts found in
-/// their notes for only some periods (candidates, evaluated), and what
-/// nothing could cover.
+/// Proposed and agent checks with their results, the totals no structure
+/// explains (each with its closest candidate, evaluated), statement amounts
+/// found in their notes for one period (candidates, evaluated), what nothing
+/// could cover, and how a checks file applied: proposals it dismissed, and
+/// entries whose labels moved or are gone, which do not apply.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Report {
     pub checks: Vec<CheckResult>,
     pub unresolved: Vec<CheckResult>,
     pub candidates: Vec<CheckResult>,
     pub uncovered: Vec<Uncovered>,
+    pub dismissed: Vec<Dismissed>,
+    pub moved: Vec<Unapplied>,
+    pub stale: Vec<Unapplied>,
     pub counts: ReportCounts,
     /// For the envelope's warnings, not the result.
     #[serde(skip)]
@@ -286,26 +307,21 @@ pub struct Report {
 
 /// Propose every check the document's structure supports and evaluate them.
 pub fn foot(doc: &Doc) -> Report {
-    let proposals = propose(doc);
-    let checks = evaluate(doc, &proposals.checks);
-    let unresolved = evaluate(doc, &proposals.unresolved).checks;
-    let candidates = evaluate(doc, &proposals.candidates).checks;
+    foot_with(doc, &ChecksFile::default())
+}
+
+/// Propose, apply a checks file over the proposals, and evaluate the result.
+pub fn foot_with(doc: &Doc, file: &ChecksFile) -> Report {
+    let ctx = Context::new(doc);
+    let mut proposals = propose(doc);
+    let applied = overlay::apply(doc, &ctx, file, &mut proposals);
+    let checks = evaluate_in(doc, &ctx, &proposals.checks);
+    let unresolved = evaluate_in(doc, &ctx, &proposals.unresolved).checks;
+    let candidates = evaluate_in(doc, &ctx, &proposals.candidates).checks;
     let uncovered: Vec<Uncovered> = proposals
         .uncovered
         .iter()
-        .map(|&(kind, t, row, col)| {
-            let table = &doc.tables[t - 1];
-            Uncovered {
-                kind,
-                cell: Located {
-                    table: t,
-                    row,
-                    col,
-                    row_label: row_label(doc, table, row),
-                    col_label: col_label(doc, table, col),
-                },
-            }
-        })
+        .map(|&(kind, t, row, col)| Uncovered { kind, cell: CellRef::at(doc, &ctx, t, row, col) })
         .collect();
     let counts = ReportCounts {
         pass: checks.counts.pass,
@@ -314,17 +330,63 @@ pub fn foot(doc: &Doc) -> Report {
         unresolved: unresolved.len(),
         candidates: candidates.len(),
         uncovered: uncovered.len(),
+        dismissed: applied.dismissed.len(),
+        moved: applied.moved.len(),
+        stale: applied.stale.len(),
     };
-    Report { checks: checks.checks, unresolved, candidates, uncovered, counts, warnings: proposals.warnings }
+    Report {
+        checks: checks.checks,
+        unresolved,
+        candidates,
+        uncovered,
+        dismissed: applied.dismissed,
+        moved: applied.moved,
+        stale: applied.stale,
+        counts,
+        warnings: proposals.warnings,
+    }
 }
 
 // ---------------------------------------------------------------------------
 // evaluation
 
+/// What evaluation and label verification read once per document: each
+/// table's unit and section.
+pub(crate) struct Context {
+    units: Vec<Option<Unit>>,
+    sections: Vec<Option<String>>,
+}
+
+impl Context {
+    pub(crate) fn new(doc: &Doc) -> Self {
+        Self { units: table_units(doc), sections: table_sections(doc) }
+    }
+
+    pub(crate) fn section(&self, table: usize) -> Option<&str> {
+        self.sections.get(table.wrapping_sub(1))?.as_deref()
+    }
+}
+
+/// The title of the sheet each table is on in the workbook model: where the
+/// table is in the document, which outlasts renumbering. None for every
+/// table when the model cannot be built (an Excel limit).
+pub fn table_sections(doc: &Doc) -> Vec<Option<String>> {
+    let mut out = vec![None; doc.tables.len()];
+    if let Ok(wb) = crate::sheets::workbook(doc) {
+        for p in &wb.placements {
+            out[p.table - 1] = Some(wb.sheets[p.sheet].title.clone());
+        }
+    }
+    out
+}
+
 /// Evaluate every check against the document, in order.
 pub fn evaluate(doc: &Doc, checks: &[Check]) -> Footing {
-    let units = table_units(doc);
-    let results: Vec<CheckResult> = checks.iter().map(|c| evaluate_one(doc, &units, c)).collect();
+    evaluate_in(doc, &Context::new(doc), checks)
+}
+
+fn evaluate_in(doc: &Doc, ctx: &Context, checks: &[Check]) -> Footing {
+    let results: Vec<CheckResult> = checks.iter().map(|c| evaluate_one(doc, ctx, c)).collect();
     let mut counts = Counts::default();
     for r in &results {
         match r.status {
@@ -336,7 +398,8 @@ pub fn evaluate(doc: &Doc, checks: &[Check]) -> Footing {
     Footing { checks: results, counts }
 }
 
-fn evaluate_one(doc: &Doc, units: &[Option<Unit>], check: &Check) -> CheckResult {
+fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
+    let units = &ctx.units;
     let t = &check.target;
     let mut result = CheckResult {
         id: check.id.clone(),
@@ -344,7 +407,7 @@ fn evaluate_one(doc: &Doc, units: &[Option<Unit>], check: &Check) -> CheckResult
         origin: check.origin,
         rule: check.rule,
         status: Status::NeedsJudgment,
-        target: Located { table: t.table, row: t.row, col: t.col, row_label: None, col_label: None },
+        target: CellRef::at(doc, ctx, t.table, t.row, t.col),
         terms: check.terms.clone(),
         actual: None,
         expected: None,
@@ -355,10 +418,6 @@ fn evaluate_one(doc: &Doc, units: &[Option<Unit>], check: &Check) -> CheckResult
         reason: None,
         note: check.note.clone(),
     };
-    if let Ok(table) = doc.table(t.table) {
-        result.target.row_label = row_label(doc, table, t.row);
-        result.target.col_label = col_label(doc, table, t.col);
-    }
     match compute(doc, units, check) {
         Ok((actual, expected, cells)) => {
             let allowed = match check.tolerance {
@@ -568,35 +627,8 @@ pub fn col_label(doc: &Doc, table: &Table, col: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
-
+    use super::testing::{doc, table};
     use super::*;
-
-    fn doc(body: &str) -> Doc {
-        let xml = format!(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DOCUMENT xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"dart4.xsd\"><BODY>{body}</BODY></DOCUMENT>"
-        );
-        Doc::parse(xml.into_bytes()).unwrap()
-    }
-
-    /// A table whose rows are `[label, figure, ...]`, under a header row.
-    fn table(header: &[&str], rows: &[&[&str]]) -> String {
-        let cols = header.len();
-        let mut t = format!("<TABLE><COLGROUP>{}</COLGROUP><THEAD><TR>", "<COL/>".repeat(cols));
-        for h in header {
-            let _ = write!(t, "<TH>{h}</TH>");
-        }
-        t.push_str("</TR></THEAD><TBODY>");
-        for row in rows {
-            t.push_str("<TR>");
-            for cell in *row {
-                let _ = write!(t, "<TD>{cell}</TD>");
-            }
-            t.push_str("</TR>");
-        }
-        t.push_str("</TBODY></TABLE>");
-        t
-    }
 
     fn unit_table(unit: &str) -> String {
         format!("<TABLE><COLGROUP><COL/></COLGROUP><TBODY><TR><TD>(단위: {unit})</TD></TR></TBODY></TABLE>")
@@ -608,7 +640,14 @@ mod tests {
             kind: Kind::Vertical,
             origin: Origin::Agent,
             rule: None,
-            target: CellRef { table: target.0, row: target.1, col: target.2, label: None },
+            target: CellRef {
+                table: target.0,
+                row: target.1,
+                col: target.2,
+                row_label: None,
+                col_label: None,
+                section: None,
+            },
             terms,
             tolerance: None,
             note: None,
@@ -753,7 +792,7 @@ mod tests {
     #[test]
     fn checks_read_and_write_their_json_form() {
         let json = r#"{"id":"T13.R3.C4","kind":"vertical","origin":"auto",
-            "target":{"table":13,"row":3,"col":4,"label":"유동자산"},
+            "target":{"table":13,"row":3,"col":4,"rowLabel":"유동자산"},
             "terms":[{"sign":1,"table":13,"rows":[4,8],"col":4},{"sign":-1,"table":2,"row":1,"cols":[2,3]}],
             "tolerance":{"perTerm":1}}"#;
         let c: Check = serde_json::from_str(json).unwrap();
@@ -784,5 +823,42 @@ mod tests {
         assert_eq!(v["checks"][0]["status"], "pass");
         assert_eq!(v["checks"][0]["target"]["rowLabel"], "계");
         assert!(v["checks"][0].get("reason").is_none());
+    }
+}
+
+/// Synthetic documents for the footing tests.
+#[cfg(test)]
+pub(crate) mod testing {
+    use crate::doc::Doc;
+
+    pub fn doc(body: &str) -> Doc {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DOCUMENT xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"dart4.xsd\"><BODY>{body}</BODY></DOCUMENT>"
+        );
+        Doc::parse(xml.into_bytes()).unwrap()
+    }
+
+    /// A table: header cells, then rows of cells, where a cell `text|n`
+    /// spans n columns.
+    pub fn table(header: &[&str], rows: &[&[&str]]) -> String {
+        let cell = |tag: &str, text: &str| match text.rsplit_once('|') {
+            Some((t, n)) => format!("<{tag} COLSPAN=\"{n}\">{t}</{tag}>"),
+            None => format!("<{tag}>{text}</{tag}>"),
+        };
+        let width: usize = header.iter().map(|h| h.rsplit_once('|').map_or(1, |(_, n)| n.parse().unwrap())).sum();
+        let mut t = format!("<TABLE><COLGROUP>{}</COLGROUP><THEAD><TR>", "<COL/>".repeat(width));
+        for h in header {
+            t.push_str(&cell("TH", h));
+        }
+        t.push_str("</TR></THEAD><TBODY>");
+        for row in rows {
+            t.push_str("<TR>");
+            for c in *row {
+                t.push_str(&cell("TD", c));
+            }
+            t.push_str("</TR>");
+        }
+        t.push_str("</TBODY></TABLE>");
+        t
     }
 }

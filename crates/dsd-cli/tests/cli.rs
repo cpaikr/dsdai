@@ -1780,7 +1780,7 @@ fn foot_proposes_checks_and_reports_unresolved_and_uncovered_totals() {
     let count = |status: &str| checks.iter().filter(|c| c["status"] == status).count();
     assert_eq!(
         r["counts"],
-        json!({"pass": count("pass"), "fail": 1, "needsJudgment": 0, "unresolved": 2, "candidates": 0, "uncovered": 2}),
+        json!({"pass": count("pass"), "fail": 1, "needsJudgment": 0, "unresolved": 2, "candidates": 0, "uncovered": 2, "dismissed": 0, "moved": 0, "stale": 0}),
         "a failed check is a finding, not a failed command"
     );
 }
@@ -1852,4 +1852,50 @@ fn foot_matches_statement_lines_with_their_notes_and_openings_with_prior_closing
     assert_eq!(candidates, ["x:T6.R3.C3/T8"]);
     assert_eq!(r["candidates"][0]["terms"], json!([{"sign": 1, "table": 8, "row": 2, "col": 4}]));
     assert_eq!(r["counts"]["candidates"], 1);
+}
+
+#[test]
+fn foot_applies_a_checks_file_and_refuses_an_invalid_one() {
+    let w = Work::new("foot-checks");
+    let src = foot_variant(&w);
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        r#"{"checks": [{"id": "v:T5.R5.C3", "kind": "vertical", "origin": "agent",
+            "target": {"table": 5, "row": 5, "col": 3, "rowLabel": "합 계", "colLabel": "전 기"},
+            "terms": [{"sign": 1, "table": 5, "rows": [3, 4], "col": 3}],
+            "tolerance": {"absolute": 10}, "note": "the prior period is rounded"}],
+           "dismiss": [{"id": "v:T5.R5.C2", "target": {"table": 5, "row": 5, "col": 2, "rowLabel": "합 계"},
+            "reason": "checked by hand"},
+            {"id": "v:T5.R6.C2", "target": {"table": 5, "row": 9, "col": 2, "rowLabel": "기타", "section": "주 석"}, "reason": "old draft"}]}"#,
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let replaced = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == "v:T5.R5.C3").unwrap();
+    assert_eq!(
+        (replaced["origin"].as_str(), replaced["status"].as_str(), replaced["allowed"].as_f64()),
+        (Some("agent"), Some("pass"), Some(10.0))
+    );
+    assert!(r["checks"].as_array().unwrap().iter().all(|c| c["id"] != "v:T5.R5.C2"));
+    // The dismissed proposal's target as the document has it now, section included.
+    assert_eq!(
+        r["dismissed"],
+        json!([{"id": "v:T5.R5.C2", "reason": "checked by hand",
+            "target": {"table": 5, "row": 5, "col": 2, "rowLabel": "합 계", "colLabel": "당 기", "section": "주 석"}}])
+    );
+    // The second dismissal names a row the table does not have; in its section 기타 is
+    // only at R6, so it moved (without the section, a 기타 in a table nearby makes it ambiguous).
+    assert_eq!(r["moved"][0]["entry"], "dismissal");
+    assert_eq!((r["moved"][0]["found"]["row"].as_u64(), r["moved"][0]["found"]["col"].as_u64()), (Some(6), Some(2)));
+    assert!(r["moved"][0]["there"].get("rowLabel").is_none(), "the stated cell does not exist");
+    assert_eq!(
+        (r["counts"]["dismissed"].as_u64(), r["counts"]["moved"].as_u64(), r["counts"]["stale"].as_u64()),
+        (Some(1), Some(1), Some(0))
+    );
+
+    std::fs::write(&checks, r#"{"checks": [{"id": "a", "kind": "vertical", "origin": "auto", "target": {"table": 1, "row": 1, "col": 1}, "terms": [{"sign": 1, "table": 1, "row": 1, "col": 1}], "note": "n"}]}"#).unwrap();
+    let run = dsd(["foot", &s(&src), "--checks", &s(&checks)]);
+    run.fails("invalid_argument");
+    assert!(run.error_text().contains("checks[0] (a): a checks file states agent checks"), "{}", run.error_text());
+    dsd(["foot", &s(&src), "--checks", &s(&w.path("absent.json"))]).fails("io_error");
 }

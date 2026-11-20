@@ -397,34 +397,9 @@ fn table_periods(doc: &Doc) -> Vec<Option<(Period, bool)>> {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt::Write as _;
-
     use crate::doc::Doc;
+    use crate::foot::testing::{doc, table};
     use crate::foot::{Report, Status, foot};
-
-    fn doc(body: &str) -> Doc {
-        let xml = format!(
-            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<DOCUMENT xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:noNamespaceSchemaLocation=\"dart4.xsd\"><BODY>{body}</BODY></DOCUMENT>"
-        );
-        Doc::parse(xml.into_bytes()).unwrap()
-    }
-
-    fn table(header: &[&str], rows: &[&[&str]]) -> String {
-        let mut t = format!("<TABLE><COLGROUP>{}</COLGROUP><THEAD><TR>", "<COL/>".repeat(header.len()));
-        for h in header {
-            let _ = write!(t, "<TH>{h}</TH>");
-        }
-        t.push_str("</TR></THEAD><TBODY>");
-        for row in rows {
-            t.push_str("<TR>");
-            for c in *row {
-                let _ = write!(t, "<TD>{c}</TD>");
-            }
-            t.push_str("</TR>");
-        }
-        t.push_str("</TBODY></TABLE>");
-        t
-    }
 
     /// A balance sheet naming notes 4 to 7, and those notes.
     fn report() -> Doc {

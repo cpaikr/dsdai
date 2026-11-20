@@ -63,7 +63,7 @@ pub fn run(command: Command) -> Outcome {
             compare(&base, &other, format, output.as_deref(), force, all, limit)
         }
         Command::Xlsx { file, output, force } => xlsx(&file, &output, force),
-        Command::Foot { file } => foot(&file),
+        Command::Foot { file, checks } => foot(&file, checks.as_deref()),
         Command::Diff { original, edited, limit, raw, format } => diff(&original, &edited, limit, raw, format.format),
         Command::SetCell { file, write, target, col, text, unit_value, flatten } => {
             let src = read_archive(&file)?;
@@ -268,9 +268,16 @@ fn xlsx(file: &Path, out: &Path, force: bool) -> Outcome {
     Ok(Output::Json { result, warnings: model.warnings.into_iter().map(Warning::from).collect() })
 }
 
-fn foot(file: &Path) -> Outcome {
+fn foot(file: &Path, checks: Option<&Path>) -> Outcome {
     let doc = document(&read_archive(file)?)?;
-    let mut report = dsd::foot::foot(&doc);
+    let overlay = match checks {
+        Some(path) => {
+            let raw = std::fs::read(path).map_err(|e| Error::io(path, &e))?;
+            dsd::foot::ChecksFile::parse(&raw).map_err(|e| Error::invalid(format!("{}: {e}", path.display())))?
+        }
+        None => dsd::foot::ChecksFile::default(),
+    };
+    let mut report = dsd::foot::foot_with(&doc, &overlay);
     let warnings = std::mem::take(&mut report.warnings).into_iter().map(Warning::from).collect();
     Ok(Output::Json { result: serde_json::to_value(report).expect("results serialize"), warnings })
 }

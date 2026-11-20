@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 from collections import Counter
 from decimal import Decimal
-import os
 import math
+import os
 import re
 import subprocess
 import sys
@@ -401,13 +401,15 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
             f"ok   {label}: xlsx {c['sheets']} sheets, {c['tables']} tables, {c['numberCells']} number and "
             f"{c['textCells']} text cells, {sum(expected.values())} text lines, {containers} nested-table container(s)"
         )
-    foot_smoke(label, src, sheets, names)
+    foot_smoke(label, src, sheets, names, tmp)
 
 
-def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
+def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> None:
     """Re-evaluate every proposed check from the exported workbook's cells,
     independently of the CLI's arithmetic: same-table terms summed from the
-    typed cells, statuses and differences compared. Prints counts only."""
+    typed cells, statuses and differences compared. Then re-state proposals
+    as agent checks in a checks file: each must apply in place with its
+    status unchanged. Prints counts only."""
     envelope = dsd("foot", str(src))
     if not envelope["ok"]:
         fail(f"{label}: `foot` failed with {envelope['error']['code']}")
@@ -475,12 +477,43 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict) -> None:
         fail(f"{label}: foot disagrees with the workbook on {disagreements} check(s)")
     if not consistent:
         fail(f"{label}: foot counts or ids are inconsistent")
-    if not disagreements and consistent:
+    overlaid = overlay_smoke(label, src, result["checks"], tmp)
+    if not disagreements and consistent and overlaid is not None:
         print(
             f"ok   {label}: foot {counts['pass']} pass, {counts['fail']} fail, {counts['needsJudgment']} needing judgment, "
             f"{counts['unresolved']} unresolved, {counts['candidates']} candidates, {counts['uncovered']} uncovered; "
-            "re-evaluated from the workbook"
+            f"re-evaluated from the workbook; {overlaid} re-stated in a checks file"
         )
+
+
+def overlay_smoke(label: str, src: Path, checks: list, tmp: Path):
+    """Dismiss the first proposal and re-state the next ones as agent checks:
+    every entry's labels are where it says, so all apply and nothing moves.
+    Returns how many entries applied, or None after a failure."""
+    sample = checks[:41]
+    if len(sample) < 2:
+        return 0
+    overlay = {
+        "checks": [
+            {"id": c["id"], "kind": c["kind"], "origin": "agent", "target": c["target"], "terms": c["terms"], "note": "smoke"}
+            for c in sample[1:]
+        ],
+        "dismiss": [{"id": sample[0]["id"], "target": sample[0]["target"], "reason": "smoke"}],
+    }
+    path = tmp / "checks.json"
+    path.write_text(json.dumps(overlay, ensure_ascii=False), encoding="utf-8")
+    envelope = dsd("foot", str(src), "--checks", str(path))
+    if not envelope["ok"]:
+        fail(f"{label}: `foot --checks` failed with {envelope['error']['code']}")
+        return None
+    result = envelope["result"]
+    statuses = {c["id"]: (c["origin"], c["status"]) for c in result["checks"]}
+    applied = all(statuses.get(c["id"]) == ("agent", c["status"]) for c in sample[1:])
+    c = result["counts"]
+    if not applied or (c["dismissed"], c["moved"], c["stale"]) != (1, 0, 0) or sample[0]["id"] in statuses:
+        fail(f"{label}: a checks file re-stating proposals did not apply in place")
+        return None
+    return len(sample) - 1
 
 
 def corpus_smoke() -> None:

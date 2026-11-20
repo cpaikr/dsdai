@@ -147,8 +147,27 @@ when both captions name a currency unit (원, 천원, 백만원, 억원, 십억�
 result.unresolved lists labelled totals no structure explains, each with its
 closest candidate evaluated: a request for judgment, not an error.
 result.candidates lists statement amounts found in their notes for one
-period only (including lines that show one period). result.uncovered lists labelled totals with nothing to sum and
-statement amounts their notes do not show.";
+period only (including lines that show one period). result.uncovered lists
+labelled totals with nothing to sum and statement amounts their notes do not
+show.
+
+--checks applies the agent's overlay, which states only decisions:
+  {\"checks\":  [{\"id\", \"kind\", \"origin\": \"agent\", \"target\", \"terms\",
+                \"tolerance\"?, \"note\"}],
+   \"dismiss\": [{\"id\", \"target\", \"reason\"}]}
+A check whose id and target match a proposal replaces it (an unresolved
+total or a candidate included); any other check is added. A note (checks) or
+a reason (dismissals) is required. A target is {\"table\", \"row\", \"col\",
+\"rowLabel\", \"colLabel\", \"section\"}: copy it from a result (from an
+uncovered entry, without its kind). Labels compare without spacing or a
+leading list number; everything else must match. An entry applies only when
+its labels and section are still at its T/R/C. When they are at exactly one
+other cell (in its section, else within three tables) it is listed in
+result.moved with that cell; otherwise, or when a dismissal's proposal is
+gone, in result.stale with a reason. Neither is applied. result.dismissed
+lists the proposals a file dismissed, with their reasons. A file that is not
+a JSON object, has unknown fields, or repeats an id fails with
+invalid_argument.";
 
 const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
 sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
@@ -296,7 +315,12 @@ C:\\DART\\Resource\\Dtd when present; without one it reports schema-skipped.")]
     },
     /// Propose footing checks from labels, hierarchy, and layout, and evaluate them.
     #[command(after_help = FOOT_AFTER)]
-    Foot { file: PathBuf },
+    Foot {
+        file: PathBuf,
+        /// JSON checks file: {"checks": [...], "dismiss": [...]}; see below.
+        #[arg(long, value_name = "CHECKS")]
+        checks: Option<PathBuf>,
+    },
     /// Changed cells and text blocks between two .dsd files, then raw line and member changes.
     Diff {
         original: PathBuf,
