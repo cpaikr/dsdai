@@ -13,11 +13,13 @@
 
 mod overlay;
 mod propose;
+mod render;
 
 use std::collections::HashSet;
 
 pub use overlay::{ChecksFile, Dismissal, Dismissed, Entry, Unapplied};
 pub use propose::{Proposals, propose};
+pub use render::{CHECKS_SHEET, render};
 use serde::{Deserialize, Serialize};
 
 use crate::amount;

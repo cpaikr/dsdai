@@ -167,7 +167,17 @@ result.moved with that cell; otherwise, or when a dismissal's proposal is
 gone, in result.stale with a reason. Neither is applied. result.dismissed
 lists the proposals a file dismissed, with their reasons. A file that is not
 a JSON object, has unknown fields, or repeats an id fails with
-invalid_argument.";
+invalid_argument.
+
+-o writes the footing workbook: the `dsd xlsx` workbook with each check as a
+live formula, its difference (target - the signed sum of its terms; 0 shows
+as a check mark, a difference beyond its allowance is red). A check down a
+table sits in a check row below it, in the target's column; a check across
+a row sits right of the table, in the target's row. The 검증 sheet lists
+every check (formulas of checks between tables are there), and 총괄표 counts
+each sheet's checks, passes, differences, and checks needing judgment by
+formula, so the counts follow corrections. Tables move down by the check
+rows, so result.workbook.tables gives each table's range in this workbook.";
 
 const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
 sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
@@ -320,6 +330,12 @@ C:\\DART\\Resource\\Dtd when present; without one it reports schema-skipped.")]
         /// JSON checks file: {"checks": [...], "dismiss": [...]}; see below.
         #[arg(long, value_name = "CHECKS")]
         checks: Option<PathBuf>,
+        /// Also write the footing workbook: the xlsx export plus a formula per check.
+        #[arg(short, long, value_name = "OUT")]
+        output: Option<PathBuf>,
+        /// Replace an existing output file (never the source .dsd or the checks file).
+        #[arg(long, requires = "output")]
+        force: bool,
     },
     /// Changed cells and text blocks between two .dsd files, then raw line and member changes.
     Diff {

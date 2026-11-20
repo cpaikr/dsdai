@@ -1899,3 +1899,40 @@ fn foot_applies_a_checks_file_and_refuses_an_invalid_one() {
     assert!(run.error_text().contains("checks[0] (a): a checks file states agent checks"), "{}", run.error_text());
     dsd(["foot", &s(&src), "--checks", &s(&w.path("absent.json"))]).fails("io_error");
 }
+
+#[test]
+fn foot_writes_a_workbook_with_a_formula_per_check() {
+    use calamine::{Data, Reader};
+    let w = Work::new("foot-workbook");
+    let src = foot_variant(&w);
+    let out = w.path("footing.xlsx");
+    let r = dsd(["foot", &s(&src), "-o", &s(&out)]).ok();
+    let book = &r["workbook"];
+    assert_eq!(book["output"], s(&out));
+    assert_eq!(book["bytes"].as_u64(), Some(std::fs::metadata(&out).unwrap().len()));
+    // The note table (T5) moved down by its check rows' room; its range says where it is now.
+    let t5 = book["tables"].as_array().unwrap().iter().find(|t| t["table"] == 5).unwrap();
+    let (sheet, top, left) = grid_origin(t5);
+    let mut xlsx = open_xlsx(&out);
+    let names = xlsx.sheet_names();
+    assert_eq!(names.last().map(String::as_str), Some("검증"));
+    // T5's prior-period 합 계 (R5C3) is off by 10: its check row holds the live difference.
+    let formulas = xlsx.worksheet_formula(&sheet).unwrap();
+    let values = xlsx.worksheet_range(&sheet).unwrap();
+    let below = top + 7 + 1; // 7 rows, one blank row, then the check rows
+    let f = formulas.get_value((below, left + 2)).unwrap();
+    let target = format!("{}{}", char::from(b'A' + u8::try_from(left + 2).unwrap()), top + 5);
+    assert!(f.starts_with(&format!("ROUND({target}-(SUM(")), "{f}");
+    assert_eq!(values.get_value((below, left + 2)), Some(&Data::Float(10.0)));
+    // 총괄표 counts the checks sheet by formula.
+    let index = xlsx.worksheet_formula("총괄표").unwrap();
+    assert!(index.used_cells().any(|(_, _, f)| f.starts_with("COUNTIFS('검증'!$A$4:$A$")));
+    // The run is byte-identical, and its output is guarded like any other.
+    let again = w.path("again.xlsx");
+    dsd(["foot", &s(&src), "-o", &s(&again)]).ok();
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&again).unwrap());
+    dsd(["foot", &s(&src), "-o", &s(&out)]).fails("output_exists");
+    dsd(["foot", &s(&src), "-o", &s(&out), "--force"]).ok();
+    dsd(["foot", &s(&src), "-o", "-"]).fails("invalid_argument");
+    dsd(["foot", &s(&src), "-o", &s(&src), "--force"]).fails("output_exists");
+}

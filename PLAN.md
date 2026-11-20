@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1–2.4 done. Next action: step 2.5 (workbook rendering of checks and live counts) |
+| Phase 2 | 2.1–2.5 done. Next action: step 2.6 (skill reference, evals, and docs) |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -565,6 +565,35 @@ Recorded during implementation:
   same labels in one section can trade places unseen, and only the target
   is verified, so a row inserted inside a term's range changes the sum
   (which shows as a failure).
+- **Footing workbook (2.5).** `dsd foot FILE [--checks C] -o OUT [--force]`
+  writes the `dsd xlsx` workbook plus checks, following the reference
+  workbook's convention. Each check is a difference formula,
+  `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),6)` (the factor converts units;
+  rounding to 6 places keeps binary noise in decimal sums from showing as a
+  difference), formatted `General;-General;"✓"` (0 shows ✓) and red outside
+  its allowance by conditional format. Every position is read through the
+  cell that owns it, as the CLI reads it: a target inside a span refers to
+  the merge's first cell, and a term range a span enters from outside lists
+  its owning cells (`SUM(B7,C8)`). A check down a table (any check whose
+  terms are not all in the target's row) sits in a check row below the
+  table, in the target's column; check rows follow their target rows, one
+  blank row after the table, and the content below moves down by them. A
+  check across a row sits in a check column right of the table (after the
+  T# marker), in the target's row. Grey labels name each check row
+  (`검증 R20 자산총계 (auto)`) and column (`차이 C7 합계 (auto/agent)`). A new
+  last sheet `검증` lists every check (시트, 위치, ID, 종류, 출처, 규칙, 대상,
+  차이, 허용, 결과, 비고): its 차이 refers to the in-table cell, or holds the
+  formula of a check between tables; 결과 is `IF(ABS(차이)<=허용,"통과","차이")`,
+  and a check needing judgment has no formula, 결과 `판단 필요`, and its reason.
+  총괄표 gains 검증/통과/차이/판단 필요 columns per sheet by `COUNTIFS` over
+  검증's listed rows (the sheet name matched as a literal, `"=name"`), and a
+  합계 row, so counts follow corrections typed into the workbook. A check on
+  a table the workbook does not place counts only in 합계. Every formula carries the CLI's result, so a reader that does
+  not recalculate shows the same values, and the output is byte-identical
+  across runs. `result.workbook` gives the output, size, sha256, sheet
+  count, and each table's range in this workbook. `dsd xlsx` output is
+  unchanged. Unresolved totals, candidates, and uncovered cells are not
+  rendered; they stay in the JSON for the agent.
 - **Column labels (2.3).** A unit caption heading the whole table is not
   part of a column label (it had made every label start `(단위: 원) /`).
 - **Corpus (2.3).** Each proposer is measured on every private sample for
@@ -589,7 +618,7 @@ Recorded during implementation:
   statement ↔ note, and prior closings.
 - [x] 2.4 Checks file: schema, merge, validation errors, and re-application
   by coordinates verified by labels (moved and stale checks).
-- [ ] 2.5 Workbook rendering of checks and live counts.
+- [x] 2.5 Workbook rendering of checks and live counts.
 - [ ] 2.6 Skill reference, evals, and docs.
 - [ ] 2.7 Gate: on the working sample, the false positives the reference
   workbook reports in movement schedules do not appear, every remaining

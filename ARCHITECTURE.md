@@ -38,7 +38,10 @@ skills/dart-dsd ──(dsd …; JSON on stdout)──► crates/dsd-cli ──�
   lines against their notes, which uses the workbook model's sheet
   partition, and openings against prior closings), and the agent's checks
   file, applied over the proposals after its labels are verified, in
-  [foot/overlay.rs](crates/dsd/src/foot/overlay.rs).
+  [foot/overlay.rs](crates/dsd/src/foot/overlay.rs), and the footing
+  workbook (the xlsx model with check rows reserved under tables, a
+  formula per check, and live counts) in
+  [foot/render.rs](crates/dsd/src/foot/render.rs).
   It has no network access and no process I/O.
 - [`crates/dsd-cli`](crates/dsd-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document. It alone contacts GitHub,
@@ -121,8 +124,9 @@ Contract version 1 (`metadata.contract`):
   each `xlsx` export with the standard library: every table cell against
   `table`, every text line against an independent extraction, and
   byte-identical reruns; re-evaluates every check `foot` proposes from
-  that workbook's typed cells; and applies a checks file re-stating those
-  proposals, which must apply in place.
+  that workbook's typed cells; applies a checks file re-stating those
+  proposals, which must apply in place; and evaluates every formula of the
+  footing workbook from its own cells, which must give `foot`'s difference.
 - The Rust implementation replaced a Python helper. Before cutover a parity
   harness matched its text views, check results, edit outputs, and diffs on
   the public fixture and the private corpus; both live in the history before

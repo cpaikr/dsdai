@@ -478,12 +478,116 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
     if not consistent:
         fail(f"{label}: foot counts or ids are inconsistent")
     overlaid = overlay_smoke(label, src, result["checks"], tmp)
-    if not disagreements and consistent and overlaid is not None:
+    formulas = footing_workbook_smoke(label, src, result["checks"], tmp)
+    if not disagreements and consistent and overlaid is not None and formulas is not None:
         print(
             f"ok   {label}: foot {counts['pass']} pass, {counts['fail']} fail, {counts['needsJudgment']} needing judgment, "
             f"{counts['unresolved']} unresolved, {counts['candidates']} candidates, {counts['uncovered']} uncovered; "
-            f"re-evaluated from the workbook; {overlaid} re-stated in a checks file"
+            f"re-evaluated from the workbook; {overlaid} re-stated in a checks file; "
+            f"{formulas} workbook formulas evaluated"
         )
+
+
+def read_formulas(path: Path) -> dict:
+    """Formulas per sheet as {(row, col): formula without "="}."""
+    with zipfile.ZipFile(path) as zf:
+        book = ET.fromstring(zf.read("xl/workbook.xml"))
+        rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))}
+        out = {}
+        for sheet in book.iter(f"{XL}sheet"):
+            target = rels[sheet.get(f"{XL_REL}id")].lstrip("/")
+            target = target if target.startswith("xl/") else "xl/" + target
+            cells = {}
+            for c in ET.fromstring(zf.read(target)).iter(f"{XL}c"):
+                f = c.find(f"{XL}f")
+                if f is not None and f.text:
+                    cells[cell_position(c.get("r"))] = f.text
+            out[sheet.get("name")] = cells
+    return out
+
+
+REFERENCE = re.compile(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]+\$?\d+)(?::(\$?[A-Z]+\$?\d+))?")
+DIFFERENCE = re.compile(r"^ROUND\((?P<target>(?:'(?:[^']|'')+'!)?\$?[A-Z]+\$?\d+)-\((?P<terms>.*)\),6\)$")
+TERM = re.compile(r"(?P<sign>[+-]?)(?:(?P<factor>[0-9.e+-]+)\*)?SUM\((?P<refs>[^)]+)\)")
+
+
+def evaluate_difference(formula: str, home: str, sheets: dict, formulas: dict):
+    """Evaluate `ROUND(target-(±[k*]SUM(refs)...),6)` or a reference to such a
+    cell, independently of the CLI, from the workbook's cell values. Returns
+    None for a formula of another shape."""
+
+    def resolve(ref: str):
+        m = REFERENCE.fullmatch(ref)
+        sheet = m.group(1).replace("''", "'") if m.group(1) else home
+        return sheet, cell_position(m.group(2)), cell_position(m.group(3)) if m.group(3) else None
+
+    def number(sheet, pos):
+        got = sheets.get(sheet, {}).get(pos)
+        return got[1] if got and got[0] == "n" else 0.0
+
+    if REFERENCE.fullmatch(formula):
+        sheet, pos, _ = resolve(formula)
+        inner = formulas.get(sheet, {}).get(pos)
+        return evaluate_difference(inner, sheet, sheets, formulas) if inner else None
+    m = DIFFERENCE.match(formula)
+    if m is None:
+        return None
+    sheet, pos, _ = resolve(m["target"])
+    total, rest = 0.0, m["terms"]
+    for term in TERM.finditer(rest):
+        part = 0.0
+        for ref in REFERENCE.finditer(term["refs"]):
+            s, first, last = resolve(ref.group(0))
+            last = last or first
+            part += sum(number(s, (r, c)) for r in range(first[0], last[0] + 1) for c in range(first[1], last[1] + 1))
+        factor = float(term["factor"]) if term["factor"] else 1.0
+        total += (-1 if term["sign"] == "-" else 1) * factor * part
+    return number(sheet, pos) - total
+
+
+def footing_workbook_smoke(label: str, src: Path, checks: list, tmp: Path):
+    """Write the footing workbook twice (byte-identical), then evaluate every
+    check's formula on the 검증 sheet from the workbook's own cells and
+    require the CLI's difference. Returns how many formulas were evaluated,
+    or None after a failure."""
+    out, again = tmp / "foot-a.xlsx", tmp / "foot-b.xlsx"
+    envelope = dsd("foot", str(src), "-o", str(out))
+    if not envelope["ok"] or not dsd("foot", str(src), "-o", str(again))["ok"]:
+        fail(f"{label}: `foot -o` failed")
+        return None
+    if out.read_bytes() != again.read_bytes():
+        fail(f"{label}: the footing workbook is not byte-identical across runs")
+        return None
+    sheets, _ = read_workbook(out)
+    formulas = read_formulas(out)
+    by_id = {c["id"]: c for c in checks}
+    name = list(sheets)[-1]  # the checks sheet is last
+    listing = sheets[name]
+    rows = sorted({r for (r, _c) in listing if r >= 3})
+    evaluated = wrong = 0
+    for r in rows:
+        check = by_id.get(listing.get((r, 2), ("s", ""))[1])
+        if check is None:
+            wrong += 1
+            continue
+        formula = formulas[name].get((r, 7))
+        if check["status"] == "needsJudgment" or formula is None:
+            wrong += formula is not None or listing.get((r, 9), ("s", ""))[1] != "판단 필요"
+            continue
+        got = evaluate_difference(formula, name, sheets, formulas)
+        if got is None:
+            wrong += 1
+            continue
+        scale = max(1.0, abs(check["difference"]), abs(got))
+        wrong += abs(got - check["difference"]) > 1e-6 * scale
+        evaluated += 1
+    if len(rows) != len(checks):
+        fail(f"{label}: the 검증 sheet lists {len(rows)} of {len(checks)} checks")
+        return None
+    if wrong:
+        fail(f"{label}: {wrong} footing workbook formula(s) disagree with `foot`")
+        return None
+    return evaluated
 
 
 def overlay_smoke(label: str, src: Path, checks: list, tmp: Path):
