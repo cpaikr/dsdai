@@ -451,9 +451,9 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
     result
 }
 
-/// Most decimal places a difference is computed to: a figure's own places
-/// (at most 15 significant digits, so up to 16 after the point), two more
-/// for a percentage, and up to 9 more for a unit conversion.
+/// Most decimal places a difference is compared to. Figures with more (a
+/// long run of leading fractional zeros) make the check need judgment
+/// rather than be compared at a precision that would hide their digits.
 const MAX_PLACES: u32 = 30;
 
 /// `x` rounded to `places` decimals, without a negative zero. Figures are
@@ -493,7 +493,7 @@ fn scaled_places(places: u32, scale: f64) -> u32 {
     // log10 of a ratio of currency units: a whole number between -9 and 9.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let extra = if scale < 1.0 { (-scale.log10()).round() as u32 } else { 0 };
-    (places + extra).min(MAX_PLACES)
+    places + extra
 }
 
 /// (actual, expected, cells summed, decimal places, Σ |values|), or why the
@@ -537,7 +537,12 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
             }
         }
     }
-    Ok((actual, expected, cells, places.min(MAX_PLACES), magnitude))
+    if places > MAX_PLACES {
+        return Err(format!(
+            "the figures carry {places} decimal places; differences are compared to at most {MAX_PLACES}"
+        ));
+    }
+    Ok((actual, expected, cells, places, magnitude))
 }
 
 enum Read {
@@ -837,6 +842,14 @@ mod tests {
         let d = doc(&table(&["과 목", "당기"], &[&["가", "0"], &["나", "0.0000000000000001"]]));
         let r = &evaluate(&d, &[check("c", (1, 3, 2), vec![term(1, 1, (2, 2), 2)])]).checks[0];
         assert_eq!((r.status, r.difference), (Status::Fail, Some(1e-16)));
+    }
+
+    #[test]
+    fn figures_beyond_the_supported_places_need_judgment() {
+        let d = doc(&table(&["과 목", "당기"], &[&["가", "0"], &["나", "0.0000000000000000000000000000001"]]));
+        let r = &evaluate(&d, &[check("c", (1, 3, 2), vec![term(1, 1, (2, 2), 2)])]).checks[0];
+        assert_eq!(r.status, Status::NeedsJudgment);
+        assert!(r.reason.as_deref().unwrap().contains("31 decimal places"));
     }
 
     #[test]

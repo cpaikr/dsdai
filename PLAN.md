@@ -609,12 +609,12 @@ Recorded during implementation:
   checks here pass.
 - **Review fixes (PR #20).**
   - **Exact decimal comparison:** a difference is rounded to the decimal
-    places its figures show (after unit conversion and percentages, at
-    most 30) and passes only within its allowance, compared exactly as the
+    places its figures show (after unit conversion and percentages; a
+    check whose figures need more than 30 needs judgment) and passes only within its allowance, compared exactly as the
     workbook's result formula compares it. Figures are decimals, so this removes binary
     noise and nothing else at any magnitude: 1 at 5×10¹³ fails. The
-    workbook formula rounds to those places or more (14 significant digits
-    of the checked amounts), so an edit with more decimals still shows, and `check.py` reads them
+    workbook formula rounds to those places or more (down to the 15th
+    significant digit of the checked amounts, a workbook number's precision), so an edit with more decimals still shows, and `check.py` reads them
     from the cells' number formats. This replaces a relative 10⁻⁹, which
     hid a 500 difference at 10¹².
   - **Units:** a unit that is not money compares only with itself, and only

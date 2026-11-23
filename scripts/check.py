@@ -519,12 +519,16 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
                         extra = round(-math.log10(factor)) if factor < 1 else 0
                         digits = max(digits, places(term["table"], row, col) + extra)
         if check["status"] == "needsJudgment":
-            ok = text or not isinstance(actual, float) or not comparable
+            # Text, an incomparable unit, or more places than the CLI compares (30).
+            ok = text or not isinstance(actual, float) or not comparable or digits > 30
         else:
             # Units come from the captions the workbook shows, not from the
             # CLI's expected value; the difference is exact to the places the
             # figures show.
-            digits = min(digits, 30)
+            if digits > 30:
+                ok = check["status"] == "needsJudgment"
+                disagreements += not ok
+                continue
             difference = round(actual - expected, digits) + 0.0 if isinstance(actual, float) else None
             allowed = check["allowed"]
             holds = difference is not None and abs(difference) <= allowed
