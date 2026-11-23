@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1–2.6 done; 2.7 gate prepared (report kept with the sample, outside the repository). Next action: owner sign-off |
+| Phase 2 | Done (owner signed off 2026-11-23). Branch `feat/footing`, not yet in a PR |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -636,9 +636,13 @@ Recorded during implementation:
 - [x] 2.6 Skill reference, evals, and docs: `references/footing.md` (model,
   workflow from run to report, checks-file example), routed from `SKILL.md`
   and the Excel section of `reading.md`; eval 11 and a trigger pair.
-- [ ] 2.7 Gate: on the working sample, the false positives the reference
+- [x] 2.7 Gate: on the working sample, the false positives the reference
   workbook reports in movement schedules do not appear, every remaining
-  difference is explained, and the owner signs off.
+  difference is explained, and the owner signs off. Signed off 2026-11-23:
+  no movement-schedule false positive of the reference workbook appears,
+  the one remaining difference is a true difference in the document, and
+  the gate report (kept with the sample, outside the repository) explains
+  every other item.
 
 ## Not planned here
 
