@@ -446,8 +446,9 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
     result
 }
 
-/// Most decimal places a difference is computed to.
-const MAX_PLACES: u32 = 9;
+/// Most decimal places a difference is computed to: a figure holds at most
+/// 15 significant digits.
+const MAX_PLACES: u32 = 15;
 
 /// `x` rounded to `places` decimals, without a negative zero. Figures are
 /// decimals, so their exact difference has no more places than they do; the
@@ -457,10 +458,10 @@ pub(crate) fn round_to(x: f64, places: u32) -> f64 {
     (x * unit).round() / unit + 0.0
 }
 
-/// Whether a rounded difference is within its allowance (the allowance is
-/// a decimal too, so a hair of binary room is kept for it).
+/// Whether a rounded difference is within its allowance, compared exactly
+/// as the workbook's result formula compares them.
 pub(crate) fn within(difference: f64, allowed: f64) -> bool {
-    difference.abs() <= allowed + 1e-12 * allowed.max(1.0)
+    difference.abs() <= allowed
 }
 
 /// Decimal places a figure's number format shows (a percentage holds two
@@ -807,6 +808,20 @@ mod tests {
         assert_eq!(r.status, Status::NeedsJudgment, "an empty row range sums nothing");
         c.terms = vec![term(2, 1, (2, 2), 2)];
         assert_eq!(evaluate(&d, &[c]).checks[0].status, Status::NeedsJudgment);
+    }
+
+    #[test]
+    fn differences_keep_every_place_figures_show_and_allowances_compare_exactly() {
+        let d = doc(&table(&["과 목", "당기"], &[&["가", "0"], &["나", "0.0000000004"], &["다", "0.1"]]));
+        // 0.0000000004 against 0: a real difference at the tenth place.
+        let tiny = evaluate(&d, &[check("tiny", (1, 3, 2), vec![term(1, 1, (2, 2), 2)])]);
+        assert_eq!((tiny.checks[0].status, tiny.checks[0].difference), (Status::Fail, Some(0.000_000_000_4)));
+        // 0.1 against 0 with an allowance just under it fails, as the workbook's formula does.
+        let mut c = check("tol", (1, 4, 2), vec![term(1, 1, (2, 2), 2)]);
+        c.tolerance = Some(Tolerance::Absolute(0.099_999_999_999_9));
+        assert_eq!(evaluate(&d, &[c.clone()]).checks[0].status, Status::Fail);
+        c.tolerance = Some(Tolerance::Absolute(0.1));
+        assert_eq!(evaluate(&d, &[c]).checks[0].status, Status::Pass);
     }
 
     #[test]

@@ -609,8 +609,9 @@ Recorded during implementation:
   checks here pass.
 - **Review fixes (PR #20).**
   - **Exact decimal comparison:** a difference is rounded to the decimal
-    places its figures show (after unit conversion, at most 9) and passes
-    only within its allowance. Figures are decimals, so this removes binary
+    places its figures show (after unit conversion, at most 15, a figure's
+    precision) and passes only within its allowance, compared exactly as the
+    workbook's result formula compares it. Figures are decimals, so this removes binary
     noise and nothing else at any magnitude: 1 at 5×10¹³ fails. The
     workbook formula rounds to the same places, and `check.py` reads them
     from the cells' number formats. This replaces a relative 10⁻⁹, which
@@ -628,8 +629,9 @@ Recorded during implementation:
     matches. One note cell cannot confirm both periods; those stay
     candidates, unless another distinct pair exists.
   - **Prior closings:** pairs stay within one section, share the line
-    describing their schedule (the last line before them that names
-    neither a period nor a unit), and pass over a prior interim table.
+    describing their schedule (the last line before them that is not only a
+    period or a unit, so `당기 취득원가` names its schedule), are the only such
+    partner nearby, and pass over a prior interim table.
   - **Re-application:** a Roman numeral is a marker only before `.` or
     `)`. An entry naming a section needs the document to name the
     same one.

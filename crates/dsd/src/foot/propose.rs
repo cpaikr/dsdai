@@ -1048,10 +1048,14 @@ fn next_day((y, m, d): (u32, u32, u32)) -> (u32, u32, u32) {
     }
 }
 
-/// Equal to 6 decimal places, which covers what figures show; evaluation
+/// Equal to 15 significant digits, the precision of a figure; evaluation
 /// then compares to the exact places the figures carry.
 fn equal(a: f64, e: f64) -> bool {
-    super::round_to(a - e, 6) == 0.0
+    let magnitude = a.abs().max(e.abs()).max(1.0);
+    // A whole number of digits between 0 and 15.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let places = (15.0 - magnitude.log10().ceil()).max(0.0) as u32;
+    super::round_to(a - e, places) == 0.0
 }
 
 /// `당기 / 합계` → `당기`; a label without parts is its own first part.
@@ -1499,6 +1503,14 @@ mod tests {
         ));
         let r = foot(&d);
         assert!(r.checks.iter().all(|c| c.target.col != 4), "{:?}", r.checks.iter().map(|c| &c.id).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn proposals_match_to_the_precision_of_a_figure() {
+        assert!(!equal(0.000_000_8, 0.000_000_4));
+        assert!(equal(0.1 + 0.2, 0.3));
+        assert!(equal(100.1 + 200.2, 300.3));
+        assert!(!equal(50_000_000_000_001.0, 50_000_000_000_000.0));
     }
 
     #[test]

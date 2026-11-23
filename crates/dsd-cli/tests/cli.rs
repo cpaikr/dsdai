@@ -2004,3 +2004,40 @@ fn foot_compares_tables_only_in_units_it_can_read() {
     assert!(reason.unwrap().contains("unit"));
     assert_eq!(status("a:shares").0, "pass", "a known non-money unit compares with itself");
 }
+
+#[test]
+fn foot_reports_an_entry_moved_when_quarter_columns_trade_places() {
+    let w = Work::new("foot-quarters");
+    let note = |first: &str, second: &str| {
+        format!(
+            "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>{first}</TH><TH>{second}</TH></TR></THEAD><TBODY>\
+<TR><TD>가</TD><TD>10</TD><TD>20</TD></TR><TR><TD>합 계</TD><TD>10</TD><TD>20</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n"
+        )
+    };
+    let variant = |name: &str, first: &str, second: &str| {
+        let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{}", note(first, second)));
+        w.variant(name, &xml)
+    };
+    let before = variant("before.dsd", "Ⅰ 분기", "Ⅱ 분기");
+    let after = variant("after.dsd", "Ⅱ 분기", "Ⅰ 분기");
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        r#"{"checks": [{"id": "a:q1", "kind": "vertical", "origin": "agent",
+            "target": {"table": 5, "row": 3, "col": 2, "rowLabel": "합 계", "colLabel": "Ⅰ 분기"},
+            "terms": [{"sign": 1, "table": 5, "row": 2, "col": 2}], "note": "the quarter's total"}]}"#,
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&before), "--checks", &s(&checks)]).ok();
+    assert!(r["checks"].as_array().unwrap().iter().any(|c| c["id"] == "a:q1"), "applies where its labels are");
+    let r = dsd(["foot", &s(&after), "--checks", &s(&checks)]).ok();
+    assert!(r["checks"].as_array().unwrap().iter().all(|c| c["id"] != "a:q1"), "not applied to the other quarter");
+    assert_eq!(r["moved"][0]["id"], "a:q1");
+    assert_eq!(
+        (r["moved"][0]["found"]["col"].as_u64(), r["moved"][0]["there"]["colLabel"].as_str()),
+        (Some(3), Some("Ⅱ 분기"))
+    );
+}

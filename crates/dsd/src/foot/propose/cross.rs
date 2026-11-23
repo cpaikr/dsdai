@@ -26,12 +26,18 @@ enum Period {
     Prior,
 }
 
+const PRIOR_WORDS: [&str; 5] = ["전기", "(전)", "전분기", "전반기", "전년"];
+const CURRENT_WORDS: [&str; 5] = ["당기", "(당)", "당분기", "당반기", "당년"];
+/// Longest first, so 당분기 goes before 당기.
+const PERIOD_WORDS: [&str; 10] =
+    ["전분기", "전반기", "당분기", "당반기", "전기", "전년", "당기", "당년", "(전)", "(당)"];
+
 /// The period a heading names: 당기 (당분기, 당반기, `(당)`) or 전기; None
 /// when it names neither or both.
 fn period(text: &str) -> Option<Period> {
     let w = compact(text);
-    let prior = ["전기", "(전)", "전분기", "전반기", "전년"].iter().any(|p| w.contains(p));
-    let current = ["당기", "(당)", "당분기", "당반기", "당년"].iter().any(|p| w.contains(p));
+    let prior = PRIOR_WORDS.iter().any(|p| w.contains(p));
+    let current = CURRENT_WORDS.iter().any(|p| w.contains(p));
     match (current, prior) {
         (true, false) => Some(Period::Current),
         (false, true) => Some(Period::Prior),
@@ -268,7 +274,7 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
         // naming the other period (a year end, when it is the prior one) with
         // the same columns (당기 취득원가 with 전기 취득원가, even when 당기
         // 감가상각누계액 sits between them).
-        let partner = (i + 1..grids.len().min(i + 7)).find(|&j| {
+        let mut partners = (i + 1..grids.len().min(i + 7)).filter(|&j| {
             !paired[j]
                 && sections[i].is_some()
                 && sections[j] == sections[i]
@@ -279,7 +285,8 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
                 && periods[j].is_some_and(|(p, interim)| p != pa && !(p == Period::Prior && interim))
                 && grids[j].as_ref().is_some_and(|b| shape(b) == shape(a))
         });
-        let Some(j) = partner else { continue };
+        // Two equally fitting partners leave the schedule's identity ambiguous.
+        let (Some(j), None) = (partners.next(), partners.next()) else { continue };
         let Some(b) = &grids[j] else { continue };
         paired[j] = true;
         let (current, prior) = if pa == Period::Current { (a, b) } else { (b, a) };
@@ -399,6 +406,12 @@ fn table_periods(doc: &Doc) -> TablePeriods {
             }
             if let Some(p) = named(line) {
                 self.previous = Some(p);
+                // A period caption that also names its schedule (당기 취득원가)
+                // describes the schedule too.
+                let rest = PERIOD_WORDS.iter().fold(line.to_owned(), |l, w| l.replace(w, ""));
+                if !key(&rest).is_empty() {
+                    self.heading = Some(key(&rest));
+                }
             } else if unit_in_text(line).is_none() {
                 self.previous = None;
                 self.heading = Some(key(line));
@@ -595,6 +608,25 @@ mod tests {
             movement(&[&["토지", "40", "5", "45"]]),
         ));
         assert!(cross(&foot(&d)).is_empty(), "{:?}", cross(&foot(&d)));
+    }
+
+    #[test]
+    fn schedule_names_in_period_captions_keep_schedules_apart() {
+        // One note heading, then 당기 취득원가 and 전기 상각누계액: not one schedule.
+        let movement = |rows: &[&[&str]]| table(&["구 분", "기초", "증가", "기말"], rows);
+        let d = doc(&format!(
+            "<P>유형자산</P><P>(1) 당기 취득원가</P><P>(단위: 원)</P>{}<P>(2) 전기 상각누계액</P><P>(단위: 원)</P>{}",
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "40", "5", "45"]]),
+        ));
+        assert!(cross(&foot(&d)).is_empty(), "{:?}", cross(&foot(&d)));
+        // The same schedule in both captions still pairs.
+        let d = doc(&format!(
+            "<P>유형자산</P><P>(1) 당기 취득원가</P><P>(단위: 원)</P>{}<P>(2) 전기 취득원가</P><P>(단위: 원)</P>{}",
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "90", "10", "100"]]),
+        ));
+        assert_eq!(cross(&foot(&d)), [("x:T1.R2.C2".to_owned(), Status::Pass)]);
     }
 
     #[test]
