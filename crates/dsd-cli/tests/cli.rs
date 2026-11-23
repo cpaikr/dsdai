@@ -1966,3 +1966,41 @@ fn foot_reports_a_small_difference_in_large_amounts_and_survives_any_table_numbe
     assert_eq!((total["status"].as_str(), total["difference"].as_f64()), (Some("fail"), Some(-500.0)));
     assert_eq!(r["stale"][0]["id"], "x", "a table number past the document is stale, not a crash");
 }
+
+#[test]
+fn foot_compares_tables_only_in_units_it_can_read() {
+    let w = Work::new("foot-units");
+    let table = |unit: &str, figure: &str| {
+        format!(
+            "<P>(단위: {unit})</P>\r\n<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH></TR></THEAD><TBODY><TR><TD>가</TD><TD>{figure}</TD></TR></TBODY></TABLE>\r\n"
+        )
+    };
+    let note = format!(
+        "<SECTION-2><TITLE>주 석</TITLE>\r\n{}{}{}{}</SECTION-2>\r\n",
+        table("미상", "10"),
+        table("미상", "10"),
+        table("주", "10"),
+        table("주", "10")
+    );
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    let src = w.variant("units.dsd", &xml);
+    let checks = w.path("checks.json");
+    let cross = |id: &str, target: usize, source: usize| {
+        format!(
+            r#"{{"id": "{id}", "kind": "cross", "origin": "agent", "target": {{"table": {target}, "row": 2, "col": 2}},
+                "terms": [{{"sign": 1, "table": {source}, "row": 2, "col": 2}}], "note": "the same figure"}}"#
+        )
+    };
+    std::fs::write(&checks, format!(r#"{{"checks": [{}, {}]}}"#, cross("a:unknown", 6, 5), cross("a:shares", 8, 7)))
+        .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let status = |id: &str| {
+        let c = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap();
+        (c["status"].as_str().unwrap().to_owned(), c["reason"].as_str().map(str::to_owned))
+    };
+    let (unknown, reason) = status("a:unknown");
+    assert_eq!(unknown, "needsJudgment", "two captions naming an unreadable unit are not comparable");
+    assert!(reason.unwrap().contains("unit"));
+    assert_eq!(status("a:shares").0, "pass", "a known non-money unit compares with itself");
+}
