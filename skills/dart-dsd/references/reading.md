@@ -49,7 +49,8 @@ of the range's first cell, so a figure found in the workbook maps back to
 `set-cell` coordinates. Images are named, not embedded. The workbook is output only: make
 corrections in the `.dsd` with the edit commands and export again. `warnings`
 report renamed sheets, tables that are unmapped or have grid problems (cells
-outside the grid are missing), and unverified content.
+outside the grid are missing), and unverified content. For a workbook that
+also checks the totals, use `dsd foot -o` ([footing](footing.md)).
 
 ## Unverified content
 

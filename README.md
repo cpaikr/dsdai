@@ -10,7 +10,7 @@ DART Editor stays the authority for layout and filing.
 
 | Path | Purpose |
 |---|---|
-| [skills/dart-dsd/](skills/dart-dsd/SKILL.md) | The agent skill: routing, [reading](skills/dart-dsd/references/reading.md), [editing](skills/dart-dsd/references/editing.md), [format reference](skills/dart-dsd/references/format.md) |
+| [skills/dart-dsd/](skills/dart-dsd/SKILL.md) | The agent skill: routing, [reading](skills/dart-dsd/references/reading.md), [editing](skills/dart-dsd/references/editing.md), [footing](skills/dart-dsd/references/footing.md), [format reference](skills/dart-dsd/references/format.md) |
 | [crates/dsd](crates/dsd/) | The format library |
 | [crates/dsd-cli](crates/dsd-cli/) | The `dsd` executable |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Boundaries, invariants, and the process contract |
