@@ -117,10 +117,10 @@ Recorded during implementation:
   whose line break is a `&cr;` alone in a SPAN. `node_text` trims each
   non-block child on its own, so that break (and a trailing space inside a
   SPAN) is lost and two lines join. Text lines now use
-  `block_text_outside_tables`, which collects SPAN content in place. Table
-  cells keep `node_text`'s rule so they stay equal to `dsd table`; the same
-  loss therefore remains in `table`, `find`, `diff`, and `compare` output,
-  left unchanged here because it alters existing commands (a follow-up).
+  `block_text_outside_tables`, which collects SPAN content in place. A
+  follow-up made `node_text` itself collect every non-block child in place,
+  so `table`, `find`, `diff`, `compare`, and the export's cells keep SPAN
+  edges too (an output change for those commands).
 - **Review fixes (1.8).** A statement section whose first table repeats its
   title keeps one sheet, named by the compacted title (it used to get an
   extra one-row sheet with the spaced title). A table with grid problems
