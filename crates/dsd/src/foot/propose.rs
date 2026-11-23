@@ -1048,8 +1048,10 @@ fn next_day((y, m, d): (u32, u32, u32)) -> (u32, u32, u32) {
     }
 }
 
+/// Equal to 6 decimal places, which covers what figures show; evaluation
+/// then compares to the exact places the figures carry.
 fn equal(a: f64, e: f64) -> bool {
-    (a - e).abs() <= super::rounding_slack(a.abs().max(e.abs()))
+    super::round_to(a - e, 6) == 0.0
 }
 
 /// `당기 / 합계` → `당기`; a label without parts is its own first part.

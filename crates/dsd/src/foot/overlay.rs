@@ -169,17 +169,14 @@ fn label_key(label: &str) -> String {
     if rest.is_empty() { compact(label) } else { rest }
 }
 
-/// `s` without one leading list marker. A numeral is a marker only when a
-/// boundary follows it (`.`, `)`, or a space): `Ⅰ분기` keeps its `Ⅰ`.
+/// `s` without one leading list marker. A numeral is a marker only when `.`
+/// or `)` follows it: `Ⅰ분기` and `Ⅰ 분기` keep their `Ⅰ`.
 fn strip_marker(s: &str) -> &str {
-    fn bounded(rest: &str) -> Option<&str> {
-        rest.strip_prefix(['.', ')']).or_else(|| rest.starts_with(char::is_whitespace).then_some(rest))
-    }
     let roman = |c: char| ('\u{2160}'..='\u{217f}').contains(&c);
     let ordinal = |c: char| "가나다라마바사아자차카타파하".contains(c);
     let Some(first) = s.chars().next() else { return s };
     if roman(first) {
-        return bounded(s.trim_start_matches(roman)).unwrap_or(s);
+        return s.trim_start_matches(roman).strip_prefix(['.', ')']).unwrap_or(s);
     }
     if let Some(dot) = s.find('.')
         && dot > 0
@@ -498,7 +495,8 @@ mod tests {
     #[test]
     fn a_numeral_is_a_marker_only_before_a_boundary() {
         assert_ne!(label_key("Ⅰ분기"), label_key("Ⅱ분기"));
-        assert_eq!(label_key("Ⅰ 유동자산"), label_key("Ⅱ.유동자산"));
+        assert_ne!(label_key("Ⅰ 분기"), label_key("Ⅱ 분기"));
+        assert_eq!(label_key("Ⅰ. 유동자산"), label_key("Ⅱ)유동자산"));
         assert!(!same_section(Some("2. 현금"), None), "a named section needs the document to name it");
         assert!(same_section(None, Some("2. 현금")));
     }

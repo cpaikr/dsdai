@@ -569,8 +569,7 @@ Recorded during implementation:
   writes the `dsd xlsx` workbook plus checks, following the reference
   workbook's convention. Each check is a difference formula,
   `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),k)` (the factor converts units;
-  rounding to the places the evaluator's slack allows keeps binary noise in
-  decimal sums from showing as a difference), formatted `General;-General;"✓"` (0 shows ✓) and red outside
+  `k` is the decimal places the figures show, as the evaluator rounds), formatted `General;-General;"✓"` (0 shows ✓) and red outside
   its allowance by conditional format. Every position is read through the
   cell that owns it, as the CLI reads it: a target inside a span refers to
   the merge's first cell, and a term range a span enters from outside lists
@@ -609,8 +608,13 @@ Recorded during implementation:
   difference (its formulas leave out the opening column), the matching
   checks here pass.
 - **Review fixes (PR #20).**
-  - **Rounding slack:** 64 ulps of the sum of the values' magnitudes,
-    replacing a relative 10⁻⁹, which hid a 500 difference at 10¹².
+  - **Exact decimal comparison:** a difference is rounded to the decimal
+    places its figures show (after unit conversion, at most 9) and passes
+    only within its allowance. Figures are decimals, so this removes binary
+    noise and nothing else at any magnitude: 1 at 5×10¹³ fails. The
+    workbook formula rounds to the same places, and `check.py` reads them
+    from the cells' number formats. This replaces a relative 10⁻⁹, which
+    hid a 500 difference at 10¹².
   - **Units:** a unit that is not money compares only with itself, and only
     when it is a known one (주, 천주, 명, 개, 건, 회, EA, USD, 천USD, EUR, JPY,
     CNY).
@@ -622,14 +626,13 @@ Recorded during implementation:
     is not 0.
   - **Statement ↔ note:** a note column headed with the other period never
     matches. One note cell cannot confirm both periods; those stay
-    candidates.
-  - **Prior closings:** pairs stay within one section and pass over a prior
-    interim table.
-  - **Re-application:** a Roman numeral is a marker only before `.`, `)`,
-    or a space. An entry naming a section needs the document to name the
+    candidates, unless another distinct pair exists.
+  - **Prior closings:** pairs stay within one section, share the line
+    describing their schedule (the last line before them that names
+    neither a period nor a unit), and pass over a prior interim table.
+  - **Re-application:** a Roman numeral is a marker only before `.` or
+    `)`. An entry naming a section needs the document to name the
     same one.
-  - **Workbook rounding:** a difference formula rounds to the places the
-    evaluator's slack allows, not a fixed 6.
   - **check.py:** unit factors are taken from the captions the workbook
     shows, not from the CLI's reported expected value.
 - **Column labels (2.3).** A unit caption heading the whole table is not

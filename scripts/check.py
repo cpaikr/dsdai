@@ -451,10 +451,14 @@ def workbook_units(sheets: dict, names: dict) -> dict:
     return units
 
 
-def rounding_slack(magnitude: float) -> float:
-    """The CLI's allowance for binary rounding of values adding up to
-    `magnitude` in absolute terms (`foot::rounding_slack`)."""
-    return 64 * sys.float_info.epsilon * max(1.0, magnitude)
+def format_places(fmt: str) -> int:
+    """Decimal places a number format shows (`foot::format_places`): a
+    percentage holds two more as a fraction."""
+    section = fmt.split(";")[0]
+    section = re.sub(r'"[^"]*"', "", section)
+    head, point, tail = section.partition(".")
+    digits = sum(1 for c in tail if c in "0#") if point else 0
+    return digits + (2 if "%" in section else 0)
 
 
 def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> None:
@@ -475,6 +479,11 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
         if got is None or got == ("s", ""):
             return None
         return got[1] if got[0] == "n" else "text"
+
+    def places(table: int, row: int, col: int) -> int:
+        sheet, (top, left), _ = names[f"DSD_T{table}"]
+        got = sheets[sheet].get((top + row - 1, left + col - 1))
+        return format_places(got[2]) if got and got[0] == "n" else 0
 
     units = workbook_units(sheets, names)
 
@@ -497,7 +506,7 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
         factors = [ratio(term["table"], target["table"]) for term in check["terms"]]
         comparable = all(f is not None for f in factors)
         actual, expected, text = value(target["table"], target["row"], target["col"]), 0.0, False
-        magnitude = abs(actual) if isinstance(actual, float) else 0.0
+        digits = places(target["table"], target["row"], target["col"])
         for term, factor in zip(check["terms"], factors):
             factor = factor or 1.0
             rows, cols = term.get("rows", [term.get("row")] * 2), term.get("cols", [term.get("col")] * 2)
@@ -507,20 +516,26 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
                     text |= got == "text"
                     if isinstance(got, float):
                         expected += term["sign"] * got * factor
-                        magnitude += abs(got * factor)
+                        extra = round(-math.log10(factor)) if factor < 1 else 0
+                        digits = max(digits, places(term["table"], row, col) + extra)
         if check["status"] == "needsJudgment":
             ok = text or not isinstance(actual, float) or not comparable
         else:
             # Units come from the captions the workbook shows, not from the
-            # CLI's expected value.
-            slack = rounding_slack(magnitude)
-            holds = isinstance(actual, float) and abs(actual - expected) <= check["allowed"] + slack
+            # CLI's expected value; the difference is exact to the places the
+            # figures show.
+            digits = min(digits, 9)
+            difference = round(actual - expected, digits) + 0.0 if isinstance(actual, float) else None
+            allowed = check["allowed"]
+            holds = difference is not None and abs(difference) <= allowed + 1e-12 * max(1.0, allowed)
+            near = lambda a, b: abs(a - b) <= 1e-12 * max(1.0, abs(a), abs(b))  # noqa: E731
             ok = (
                 comparable
                 and not text
-                and isinstance(actual, float)
-                and abs(check["actual"] - actual) <= slack
-                and abs(check["expected"] - expected) <= slack
+                and difference is not None
+                and near(check["actual"], actual)
+                and near(check["expected"], expected)
+                and abs(check["difference"] - difference) <= 10.0 ** -(digits + 1)
                 and (check["status"] == "pass") == holds
             )
         disagreements += not ok
@@ -567,7 +582,7 @@ def read_formulas(path: Path) -> dict:
 
 
 REFERENCE = re.compile(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]+\$?\d+)(?::(\$?[A-Z]+\$?\d+))?")
-DIFFERENCE = re.compile(r"^ROUND\((?P<target>(?:'(?:[^']|'')+'!)?\$?[A-Z]+\$?\d+)-\((?P<terms>.*)\),-?\d+\)$")
+DIFFERENCE = re.compile(r"^ROUND\((?P<target>(?:'(?:[^']|'')+'!)?\$?[A-Z]+\$?\d+)-\((?P<terms>.*)\),(?P<places>-?\d+)\)$")
 TERM = re.compile(r"(?P<sign>[+-]?)(?:(?P<factor>[0-9.e+-]+)\*)?SUM\((?P<refs>[^)]+)\)")
 
 
@@ -602,7 +617,7 @@ def evaluate_difference(formula: str, home: str, sheets: dict, formulas: dict):
             part += sum(number(s, (r, c)) for r in range(first[0], last[0] + 1) for c in range(first[1], last[1] + 1))
         factor = float(term["factor"]) if term["factor"] else 1.0
         total += (-1 if term["sign"] == "-" else 1) * factor * part
-    return number(sheet, pos) - total
+    return round(number(sheet, pos) - total, int(m["places"])) + 0.0
 
 
 def footing_workbook_smoke(label: str, src: Path, checks: list, tmp: Path):
@@ -638,8 +653,8 @@ def footing_workbook_smoke(label: str, src: Path, checks: list, tmp: Path):
         if got is None:
             wrong += 1
             continue
-        scale = max(1.0, abs(check["difference"]), abs(got))
-        wrong += abs(got - check["difference"]) > 1e-6 * scale
+        # Both are rounded to the places the figures carry: they agree exactly.
+        wrong += abs(got - check["difference"]) > 1e-9 * max(1.0, abs(got))
         evaluated += 1
     if len(rows) != len(checks):
         fail(f"{label}: the 검증 sheet lists {len(rows)} of {len(checks)} checks")

@@ -240,10 +240,10 @@ pub struct CheckResult {
     pub allowed: f64,
     /// Cells summed by the terms (a spanning cell counts once).
     pub cells: usize,
-    /// Σ |values| of the target and every summed cell, which bounds their
-    /// binary rounding; for rendering, not the result.
+    /// Decimal places the figures carry (after unit conversion), to which
+    /// the difference is rounded; for rendering, not the result.
     #[serde(skip)]
-    pub magnitude: f64,
+    pub places: u32,
     /// The target table's unit caption, when found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -420,47 +420,81 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
         difference: None,
         allowed: 0.0,
         cells: 0,
-        magnitude: 0.0,
+        places: 0,
         unit: units.get(t.table.wrapping_sub(1)).cloned().flatten().map(|u| u.text),
         reason: None,
         note: check.note.clone(),
     };
     match compute(doc, units, check) {
-        Ok((actual, expected, cells, magnitude)) => {
+        Ok((actual, expected, cells, places)) => {
             let allowed = match check.tolerance {
                 None => 0.0,
                 Some(Tolerance::Absolute(a)) => a.abs(),
                 Some(Tolerance::PerTerm(p)) => p.abs() * cells as f64,
             };
-            let difference = actual - expected;
-            let slack = rounding_slack(magnitude);
-            result.status = if difference.abs() <= allowed + slack { Status::Pass } else { Status::Fail };
+            let difference = round_to(actual - expected, places);
+            result.status = if within(difference, allowed) { Status::Pass } else { Status::Fail };
             result.actual = Some(actual);
             result.expected = Some(expected);
             result.difference = Some(difference);
             result.allowed = allowed;
             result.cells = cells;
-            result.magnitude = magnitude;
+            result.places = places;
         }
         Err(reason) => result.reason = Some(reason),
     }
     result
 }
 
-/// How far binary rounding of decimal figures can move a sum whose values
-/// add up to `magnitude` in absolute terms: a few units in the last place,
-/// so a difference of one displayed unit is never absorbed (it is under
-/// 0.02 at 10¹²).
-pub(crate) fn rounding_slack(magnitude: f64) -> f64 {
-    64.0 * f64::EPSILON * magnitude.max(1.0)
+/// Most decimal places a difference is computed to.
+const MAX_PLACES: u32 = 9;
+
+/// `x` rounded to `places` decimals, without a negative zero. Figures are
+/// decimals, so their exact difference has no more places than they do; the
+/// rounding removes binary noise and nothing else, at any magnitude.
+pub(crate) fn round_to(x: f64, places: u32) -> f64 {
+    let unit = 10f64.powi(i32::try_from(places).unwrap_or(0));
+    (x * unit).round() / unit + 0.0
 }
 
-/// (actual, expected, cells summed, Σ |values|), or why the check cannot be
-/// evaluated.
-fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize, f64), String> {
+/// Whether a rounded difference is within its allowance (the allowance is
+/// a decimal too, so a hair of binary room is kept for it).
+pub(crate) fn within(difference: f64, allowed: f64) -> bool {
+    difference.abs() <= allowed + 1e-12 * allowed.max(1.0)
+}
+
+/// Decimal places a figure's number format shows (a percentage holds two
+/// more as a fraction).
+fn format_places(format: &str) -> u32 {
+    let section = format.split(';').next().unwrap_or(format);
+    let mut digits = 0;
+    let (mut quoted, mut after_point) = (false, false);
+    for c in section.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            '.' if !quoted => after_point = true,
+            '0' | '#' if !quoted && after_point => digits += 1,
+            _ => {}
+        }
+    }
+    digits + if section.contains('%') { 2 } else { 0 }
+}
+
+/// Places a figure in table `from` keeps when converted by `scale` (a
+/// conversion to a larger unit adds them).
+fn scaled_places(places: u32, scale: f64) -> u32 {
+    // log10 of a ratio of currency units: a whole number between -9 and 9.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let extra = if scale < 1.0 { (-scale.log10()).round() as u32 } else { 0 };
+    (places + extra).min(MAX_PLACES)
+}
+
+/// (actual, expected, cells summed, decimal places), or why the check
+/// cannot be evaluated.
+fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize, u32), String> {
     let t = &check.target;
-    let actual = match read(doc, t.table, t.row, t.col)? {
-        Read::Number(v) => v,
+    let (actual, mut places) = match read(doc, t.table, t.row, t.col)? {
+        Read::Number(v, p) => (v, p),
         Read::Blank => return Err(format!("the target T{}R{}C{} is blank", t.table, t.row, t.col)),
     };
     if check.terms.is_empty() {
@@ -474,7 +508,6 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
         }
     }
     let mut expected = 0.0;
-    let mut magnitude = actual.abs();
     let mut cells = 0;
     for term in &check.terms {
         let scale = scale(units, term.table, t.table)?;
@@ -488,18 +521,19 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
                     continue;
                 }
                 cells += 1;
-                if let Read::Number(v) = read(doc, term.table, cell.row, cell.col)? {
+                if let Read::Number(v, p) = read(doc, term.table, cell.row, cell.col)? {
                     expected += f64::from(term.sign) * v * scale;
-                    magnitude += (v * scale).abs();
+                    places = places.max(scaled_places(p, scale));
                 }
             }
         }
     }
-    Ok((actual, expected, cells, magnitude))
+    Ok((actual, expected, cells, places.min(MAX_PLACES)))
 }
 
 enum Read {
-    Number(f64),
+    /// A figure and the decimal places its text shows.
+    Number(f64, u32),
     Blank,
 }
 
@@ -513,7 +547,7 @@ fn read(doc: &Doc, t: usize, row: usize, col: usize) -> Result<Read, String> {
         return Ok(Read::Blank);
     }
     amount::parse(&text)
-        .map(|a| Read::Number(a.value))
+        .map(|a| Read::Number(a.value, format_places(&a.format)))
         .ok_or_else(|| format!("T{t}R{}C{} is not a figure", cell.row, cell.col))
 }
 

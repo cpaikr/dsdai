@@ -201,8 +201,18 @@ pub(super) fn statement_notes(doc: &Doc, out: &mut Proposals) {
                 let side_by_side = pairs
                     .filter(|(a, b)| a.table == b.table && a.row == b.row && a.col != b.col)
                     .max_by_key(|(a, b)| (a.score.max(b.score), std::cmp::Reverse((a.table, a.row))));
-                let (a, b) = side_by_side.unwrap_or_else(|| (best(&hits[0]).unwrap(), best(&hits[1]).unwrap()));
+                // Else the best pair of two distinct cells.
                 let cell = |h: &Hit| (h.table, h.row, h.col);
+                let distinct = || {
+                    hits[0]
+                        .iter()
+                        .flat_map(|a| hits[1].iter().map(move |b| (*a, *b)))
+                        .filter(|(a, b)| cell(a) != cell(b))
+                        .max_by_key(|(a, b)| (a.score + b.score, std::cmp::Reverse((cell(a), cell(b)))))
+                };
+                let (a, b) = side_by_side
+                    .or_else(distinct)
+                    .unwrap_or_else(|| (best(&hits[0]).unwrap(), best(&hits[1]).unwrap()));
                 if cell(&a) == cell(&b) {
                     // One note cell cannot confirm both periods (equal amounts).
                     out.candidates.push(emit(&a, 0));
@@ -239,7 +249,7 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
     for g in grids.iter().flatten() {
         within(g, out);
     }
-    let periods = table_periods(doc);
+    let (periods, headings) = table_periods(doc);
     // A pair stays within one section (note or statement), so neighbouring
     // schedules of other notes are never compared.
     let sections = crate::foot::table_sections(doc);
@@ -262,6 +272,10 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
             !paired[j]
                 && sections[i].is_some()
                 && sections[j] == sections[i]
+                // The same schedule: one description heads both periods'
+                // tables, so two schedules of one note are never compared.
+                && headings[i].is_some()
+                && headings[j] == headings[i]
                 && periods[j].is_some_and(|(p, interim)| p != pa && !(p == Period::Prior && interim))
                 && grids[j].as_ref().is_some_and(|b| shape(b) == shape(a))
         });
@@ -363,13 +377,33 @@ fn unique(labelled: impl Iterator<Item = (String, usize)>) -> std::collections::
 }
 
 /// Each table's period and whether it is an interim one, from its own header
-/// row or the caption just before it (`<당기>`, `(2) 전분기`); None when
-/// neither names one.
-fn table_periods(doc: &Doc) -> Vec<Option<(Period, bool)>> {
+/// row or the caption just before it (`<당기>`, `(2) 전분기`), None when
+/// neither names one; and the description heading its schedule.
+/// Per table: its period and whether it is interim, and its schedule's heading.
+type TablePeriods = (Vec<Option<(Period, bool)>>, Vec<Option<String>>);
+
+fn table_periods(doc: &Doc) -> TablePeriods {
     struct Walk<'a> {
         doc: &'a Doc,
         periods: Vec<Option<(Period, bool)>>,
         previous: Option<(Period, bool)>,
+        /// The last line that is neither a period nor a unit caption: the
+        /// schedule's description, shared by its 당기 and 전기 tables.
+        heading: Option<String>,
+        headings: Vec<Option<String>>,
+    }
+    impl Walk<'_> {
+        fn line(&mut self, line: &str) {
+            if line.trim().is_empty() {
+                return;
+            }
+            if let Some(p) = named(line) {
+                self.previous = Some(p);
+            } else if unit_in_text(line).is_none() {
+                self.previous = None;
+                self.heading = Some(key(line));
+            }
+        }
     }
     impl Walk<'_> {
         fn walk(&mut self, node: NodeId) {
@@ -391,17 +425,15 @@ fn table_periods(doc: &Doc) -> Vec<Option<(Period, bool)>> {
                     if table.rows.len() == 1 {
                         // A one-row table is a caption for the next table; a
                         // unit caption keeps the period named before it.
-                        if named(&first_row).is_some() || unit_in_text(&first_row).is_none() {
-                            self.previous = named(&first_row);
-                        }
+                        self.line(&first_row);
                         continue;
                     }
                     self.periods[table.index - 1] = named(&first_row).or(self.previous.take());
+                    self.headings[table.index - 1].clone_from(&self.heading);
                 } else if BLOCK_TEXT_TAGS.contains(&tag) {
                     let text = node_text(tree, child, false);
-                    let line = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-                    if !line.is_empty() && (named(line).is_some() || unit_in_text(line).is_none()) {
-                        self.previous = named(line);
+                    for line in text.lines() {
+                        self.line(line);
                     }
                 } else {
                     self.walk(child);
@@ -409,9 +441,10 @@ fn table_periods(doc: &Doc) -> Vec<Option<(Period, bool)>> {
             }
         }
     }
-    let mut w = Walk { doc, periods: vec![None; doc.tables.len()], previous: None };
+    let n = doc.tables.len();
+    let mut w = Walk { doc, periods: vec![None; n], previous: None, heading: None, headings: vec![None; n] };
     w.walk(doc.root());
-    w.periods
+    (w.periods, w.headings)
 }
 
 #[cfg(test)]
@@ -542,7 +575,7 @@ mod tests {
         assert!(cross(&foot(&d)).iter().all(|(id, _)| !id.starts_with("x:T1.")), "{:?}", cross(&foot(&d)));
         // A prior interim table between the current table and its year-end partner is passed over.
         let d = doc(&format!(
-            "<P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전반기</P><P>(단위: 원)</P>{}<P>(3) 전기</P><P>(단위: 원)</P>{}",
+            "<P>유형자산의 변동내역은 다음과 같습니다.</P><P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전반기</P><P>(단위: 원)</P>{}<P>(3) 전기</P><P>(단위: 원)</P>{}",
             movement(&[&["토지", "100", "10", "110"]]),
             movement(&[&["토지", "90", "5", "95"]]),
             movement(&[&["토지", "90", "10", "100"]]),
@@ -552,10 +585,38 @@ mod tests {
     }
 
     #[test]
+    fn two_schedules_of_one_note_are_not_paired() {
+        // One note: a current 취득원가 schedule and a prior 상각누계액 schedule
+        // share columns and a 토지 row but not their description.
+        let movement = |rows: &[&[&str]]| table(&["구 분", "기초", "증가", "기말"], rows);
+        let d = doc(&format!(
+            "<P>취득원가의 변동</P><P>(1) 당기</P><P>(단위: 원)</P>{}<P>상각누계액의 변동</P><P>(2) 전기</P><P>(단위: 원)</P>{}",
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "40", "5", "45"]]),
+        ));
+        assert!(cross(&foot(&d)).is_empty(), "{:?}", cross(&foot(&d)));
+    }
+
+    #[test]
+    fn a_distinct_pair_is_found_when_the_best_hits_coincide() {
+        // Both periods are 100; one note row holds 100 twice in different rows' cells.
+        let r = foot(&statement_and_note(("100", "100"), ("구분A", "구분B"), ("100", "-")));
+        assert_eq!(r.candidates.len(), 2);
+        let d = doc(&format!(
+            "<SECTION-1><TITLE>재 무 제 표</TITLE><TABLE><COLGROUP><COL/></COLGROUP><TBODY><TR><TD>재 무 상 태 표</TD></TR></TBODY></TABLE><P>(단위: 원)</P>{}</SECTION-1>             <SECTION-1><TITLE>주 석</TITLE><P>4. 현금</P><P>(단위: 원)</P>{}</SECTION-1>",
+            table(&["과 목", "주 석", "당 기", "전 기"], &[&["현금", "4", "100", "100"]]),
+            table(&["구 분", "금액"], &[&["현금", "100"], &["합 계", "100"]]),
+        ));
+        let r = foot(&d);
+        let notes: Vec<(String, Status)> = cross(&r).into_iter().filter(|(id, _)| id.contains('/')).collect();
+        assert_eq!(notes.len(), 2, "two distinct cells confirm the two periods: {:?} {:?}", notes, r.candidates);
+    }
+
+    #[test]
     fn paired_movement_tables_open_with_the_prior_closing() {
         let movement = |rows: &[&[&str]]| table(&["구 분", "기초", "취득", "기말"], rows);
         let d = doc(&format!(
-            "<P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전기</P><P>(단위: 원)</P>{}<P>(1) 당분기</P><P>(단위: 원)</P>{}<P>(2) 전분기</P><P>(단위: 원)</P>{}",
+            "<P>유형자산의 변동내역은 다음과 같습니다.</P><P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전기</P><P>(단위: 원)</P>{}<P>(1) 당분기</P><P>(단위: 원)</P>{}<P>(2) 전분기</P><P>(단위: 원)</P>{}",
             movement(&[&["토지", "100", "10", "110"], &["건물", "50", "5", "55"]]),
             movement(&[&["토지", "90", "10", "100"], &["건물", "40", "5", "45"]]),
             movement(&[&["토지", "100", "10", "110"]]),
@@ -599,7 +660,7 @@ mod tests {
             )
         };
         let d = doc(&format!(
-            "<P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전기</P><P>(단위: 원)</P>{}",
+            "<P>유형자산의 변동내역은 다음과 같습니다.</P><P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전기</P><P>(단위: 원)</P>{}",
             movement("110"),
             movement("100"),
         ));

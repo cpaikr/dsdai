@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
-use super::{CheckResult, Origin, Report, Status, Unit, rounding_slack, scale, table_units};
+use super::{CheckResult, Origin, Report, Status, Unit, scale, table_units};
 use crate::doc::Doc;
 use crate::error::Result;
 use crate::sheets::{
@@ -142,8 +142,8 @@ pub fn render(doc: &Doc, report: &Report) -> Result<(Workbook, Vec<u8>)> {
 /// sheet `home` and qualified elsewhere; None when a table is not in the
 /// workbook. A spanning cell's figure is at its merge's first cell, so every
 /// position is read through the cell that owns it, as the CLI reads it.
-/// Rounding to `k` places (see [`places`]) removes binary noise but keeps
-/// every difference the evaluator reports.
+/// Rounding to the places the figures carry (`k`) removes binary noise and
+/// keeps every difference, as the evaluator does.
 fn formula(
     doc: &Doc,
     model: &Workbook,
@@ -200,19 +200,9 @@ fn formula(
         }
         let _ = write!(f, "SUM({range})");
     }
-    let _ = write!(f, "),{})", places(check));
+    // The places the figures carry, as the evaluator rounds the difference.
+    let _ = write!(f, "),{})", check.places);
     Some(f)
-}
-
-/// Decimal places that hold every difference beyond the evaluator's rounding
-/// slack for this check but not the binary noise inside it: 13 for small
-/// figures, 1 around 10^12.
-fn places(check: &CheckResult) -> i32 {
-    let slack = rounding_slack(check.magnitude);
-    // f64 to i32 of a value between about -16 and 16.
-    #[allow(clippy::cast_possible_truncation)]
-    let k = (-slack.log10()).floor() as i32;
-    k
 }
 
 fn cell(row: u32, col: u16, value: Value, role: Role) -> Cell {
@@ -224,16 +214,8 @@ fn text(row: u32, col: u16, value: impl Into<String>, role: Role) -> Cell {
 }
 
 fn difference(row: u32, col: u16, formula: String, check: &CheckResult) -> Cell {
-    // As the formula computes it: noise within the slack is 0, the rest is
-    // rounded to the formula's places, without a negative zero.
-    let shown = |d: f64| {
-        if d.abs() <= rounding_slack(check.magnitude) {
-            return 0.0;
-        }
-        let unit = 10f64.powi(places(check));
-        (d * unit).round() / unit + 0.0
-    };
-    let result = check.difference.map_or_else(String::new, |d| format!("{}", shown(d)));
+    // The evaluator's difference is already rounded as the formula rounds it.
+    let result = check.difference.map_or_else(String::new, |d| format!("{d}"));
     cell(row, col, Value::Formula { formula, result, format: Some(DIFFERENCE_FORMAT.to_owned()) }, Role::Plain)
 }
 
@@ -509,12 +491,12 @@ mod tests {
         assert_eq!(
             formulas(sheet),
             pairs(&[
-                ("F7", "ROUND(D7-(SUM(B7:C7)),13)"),
-                ("F8", "ROUND(D8-(SUM(B8:C8)),12)"),
-                ("F9", "ROUND(D9-(SUM(B9:C9)),12)"),
-                ("B11", "ROUND(B9-(SUM(B7:B8)),12)"),
-                ("C11", "ROUND(C9-(SUM(C7:C8)),12)"),
-                ("D11", "ROUND(D9-(SUM(D7:D8)),12)"),
+                ("F7", "ROUND(D7-(SUM(B7:C7)),0)"),
+                ("F8", "ROUND(D8-(SUM(B8:C8)),0)"),
+                ("F9", "ROUND(D9-(SUM(B9:C9)),0)"),
+                ("B11", "ROUND(B9-(SUM(B7:B8)),0)"),
+                ("C11", "ROUND(C9-(SUM(C7:C8)),0)"),
+                ("D11", "ROUND(D9-(SUM(D7:D8)),0)"),
             ])
         );
         assert_eq!(shown(sheet, "A11"), "검증 R4 합 계 (auto)");
@@ -564,7 +546,7 @@ mod tests {
         ));
         let (wb, _) = render(&d, &foot(&d)).unwrap();
         let listed = formulas(wb.sheets.last().unwrap());
-        assert_eq!(listed[0], ("H4".to_owned(), "ROUND('재무상태표'!C9-(1000*SUM('주석4'!B8)),7)".to_owned()));
+        assert_eq!(listed[0], ("H4".to_owned(), "ROUND('재무상태표'!C9-(1000*SUM('주석4'!B8)),0)".to_owned()));
     }
 
     #[test]
@@ -627,7 +609,7 @@ mod tests {
         let (wb, _) = render(&d, &report).unwrap();
         let listed = formulas(&wb.sheets[1]);
         // The target C7 is inside the B7:C7 merge; so is the second term.
-        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),12)");
+        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),0)");
     }
 
     #[test]
@@ -664,6 +646,18 @@ mod tests {
             "{:?}",
             cell.value
         );
+    }
+
+    #[test]
+    fn a_one_unit_difference_at_any_magnitude_fails_in_both() {
+        let d = doc(&table(&["구 분", "당기"], &[&["가", "50,000,000,000,000"], &["합 계", "50,000,000,000,001"]]));
+        let report = foot(&d);
+        assert_eq!((report.unresolved[0].status, report.unresolved[0].difference), (Status::Fail, Some(1.0)));
+        let mut report = report;
+        report.checks = std::mem::take(&mut report.unresolved);
+        let (wb, _) = render(&d, &report).unwrap();
+        let listed = formulas(&wb.sheets[1]);
+        assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),0)", "rounded to the places the figures carry");
     }
 
     #[test]
