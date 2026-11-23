@@ -206,8 +206,8 @@ fn formula(
 
 /// The places a difference formula rounds to: those the figures carry (as
 /// the evaluator rounds), or more down to the 15th significant digit of the
-/// checked amounts, the precision a workbook number holds, so a value typed
-/// with more decimals than the document shows still appears.
+/// largest checked amount, the precision a workbook number holds, so a value
+/// typed with more decimals than the document shows still appears.
 fn places(check: &CheckResult) -> u32 {
     // log10 of a finite magnitude of at least 1: a whole number below 310.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -502,10 +502,10 @@ mod tests {
             formulas(sheet),
             pairs(&[
                 ("F7", "ROUND(D7-(SUM(B7:C7)),14)"),
-                ("F8", "ROUND(D8-(SUM(B8:C8)),13)"),
+                ("F8", "ROUND(D8-(SUM(B8:C8)),14)"),
                 ("F9", "ROUND(D9-(SUM(B9:C9)),13)"),
                 ("B11", "ROUND(B9-(SUM(B7:B8)),14)"),
-                ("C11", "ROUND(C9-(SUM(C7:C8)),13)"),
+                ("C11", "ROUND(C9-(SUM(C7:C8)),14)"),
                 ("D11", "ROUND(D9-(SUM(D7:D8)),13)"),
             ])
         );
@@ -619,7 +619,7 @@ mod tests {
         let (wb, _) = render(&d, &report).unwrap();
         let listed = formulas(&wb.sheets[1]);
         // The target C7 is inside the B7:C7 merge; so is the second term.
-        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),13)");
+        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),14)");
     }
 
     #[test]
@@ -667,7 +667,7 @@ mod tests {
         report.checks = std::mem::take(&mut report.unresolved);
         let (wb, _) = render(&d, &report).unwrap();
         let listed = formulas(&wb.sheets[1]);
-        assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),0)", "at 10^14 the 15th digit is the units");
+        assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),1)", "the 15th digit of 5×10^13 is the first decimal");
     }
 
     #[test]
@@ -676,15 +676,28 @@ mod tests {
         let d = doc(&table(&["구 분", "당기"], &[&["가", "1"], &["합 계", "1"]]));
         let (wb, _) = render(&d, &foot(&d)).unwrap();
         let listed = formulas(&wb.sheets[1]);
-        assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),14)");
+        assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),15)");
     }
 
     #[test]
     fn an_edit_at_the_fifteenth_digit_of_a_large_integer_check_shows() {
-        // 10^13 = 10^13: the formula keeps one place, so 9,999,999,999,999.9 shows 0.1.
+        // 10^13 = 10^13: the formula keeps two places, so 9,999,999,999,999.9 shows 0.1.
         let d = doc(&table(&["구 분", "당기"], &[&["가", "10,000,000,000,000"], &["합 계", "10,000,000,000,000"]]));
         let (wb, _) = render(&d, &foot(&d)).unwrap();
+        assert_eq!(formulas(&wb.sheets[1])[0].1, "ROUND(B6-(SUM(B5)),2)");
+    }
+
+    #[test]
+    fn a_fifteen_digit_edit_to_a_large_amount_survives_the_rounding() {
+        // 9×10^13 = 9×10^13, then the target typed as 89,999,999,999,999.9.
+        let d = doc(&table(&["구 분", "당기"], &[&["가", "90,000,000,000,000"], &["합 계", "90,000,000,000,000"]]));
+        let report = foot(&d);
+        let (wb, _) = render(&d, &report).unwrap();
         assert_eq!(formulas(&wb.sheets[1])[0].1, "ROUND(B6-(SUM(B5)),1)");
+        // What the recalculated formula gives for the edit.
+        let places = places(&report.checks[0]);
+        let shown = crate::foot::round_to(89_999_999_999_999.9 - 90_000_000_000_000.0, places);
+        assert!((shown + 0.1).abs() < 1e-9, "{shown}");
     }
 
     #[test]

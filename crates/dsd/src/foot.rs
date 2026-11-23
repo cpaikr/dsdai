@@ -244,7 +244,7 @@ pub struct CheckResult {
     /// the difference is rounded; for rendering, not the result.
     #[serde(skip)]
     pub places: u32,
-    /// Σ |values| of the target and the summed cells; for rendering.
+    /// The largest |value| among the target and the summed cells; for rendering.
     #[serde(skip)]
     pub magnitude: f64,
     /// The target table's unit caption, when found.
@@ -496,8 +496,8 @@ fn scaled_places(places: u32, scale: f64) -> u32 {
     places + extra
 }
 
-/// (actual, expected, cells summed, decimal places, Σ |values|), or why the
-/// check cannot be evaluated.
+/// (actual, expected, cells summed, decimal places, largest |value|), or why
+/// the check cannot be evaluated.
 fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize, u32, f64), String> {
     let t = &check.target;
     let (actual, mut places) = match read(doc, t.table, t.row, t.col)? {
@@ -532,7 +532,7 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
                 if let Read::Number(v, p) = read(doc, term.table, cell.row, cell.col)? {
                     expected += f64::from(term.sign) * v * scale;
                     places = places.max(scaled_places(p, scale));
-                    magnitude += (v * scale).abs();
+                    magnitude = magnitude.max((v * scale).abs());
                 }
             }
         }

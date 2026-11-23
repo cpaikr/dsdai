@@ -2064,3 +2064,27 @@ fn foot_pairs_prior_closings_only_when_each_table_has_one_fit() {
     assert_eq!(run("one.dsd", &[current.clone(), prior.clone()]), 1, "one current and one prior table pair");
     assert_eq!(run("two.dsd", &[current.clone(), current, prior]), 0, "the prior table fits two: ambiguous");
 }
+
+#[test]
+fn foot_needs_judgment_for_figures_beyond_the_compared_places() {
+    let w = Work::new("foot-places");
+    let note = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH></TR></THEAD><TBODY>\
+<TR><TD>가</TD><TD>0</TD></TR><TR><TD>나</TD><TD>0.0000000000000000000000000000001</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    let src = w.variant("places.dsd", &xml);
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        r#"{"checks": [{"id": "a:tiny", "kind": "vertical", "origin": "agent",
+            "target": {"table": 5, "row": 3, "col": 2}, "terms": [{"sign": 1, "table": 5, "row": 2, "col": 2}],
+            "note": "a 31-place figure against 0"}]}"#,
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let c = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == "a:tiny").unwrap();
+    assert_eq!(c["status"], "needsJudgment", "not compared at a precision that would hide its digits");
+    assert!(c["reason"].as_str().unwrap().contains("31 decimal places"));
+}

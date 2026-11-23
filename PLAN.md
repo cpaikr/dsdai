@@ -614,7 +614,8 @@ Recorded during implementation:
     workbook's result formula compares it. Figures are decimals, so this removes binary
     noise and nothing else at any magnitude: 1 at 5×10¹³ fails. The
     workbook formula rounds to those places or more (down to the 15th
-    significant digit of the checked amounts, a workbook number's precision), so an edit with more decimals still shows, and `check.py` reads them
+    significant digit of the largest checked amount, a workbook number's
+    precision), so an edit with more decimals still shows, and `check.py` reads them
     from the cells' number formats. This replaces a relative 10⁻⁹, which
     hid a 500 difference at 10¹².
   - **Units:** a unit that is not money compares only with itself, and only
