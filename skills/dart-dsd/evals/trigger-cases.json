@@ -9,7 +9,8 @@
     "Compare the two .dsd drafts and tell me which numbers changed.",
     "DART 편집기 파일(.dsd) 기간을 2025년 12월 31일로 바꿔줘",
     "Check whether my edited .dsd will still open cleanly in DART Editor.",
-    "감사보고서 dsd를 엑셀로 변환해서 재무제표랑 주석을 시트별로 나눠줘"
+    "감사보고서 dsd를 엑셀로 변환해서 재무제표랑 주석을 시트별로 나눠줘",
+    "분기검토보고서 dsd 주석 표들 합계 검증 좀 해줘. 틀린 데만 알려줘."
   ],
   "should_not_trigger": [
     "OpenDART API로 삼성전자 사업보고서 원문 받아줘",
@@ -17,6 +18,7 @@
     "DART 편집기 설치가 안 돼요, 오류 메시지 봐줘",
     "Convert this audit report PDF into Markdown.",
     "K-IFRS 1116호 리스 문단 찾아줘",
-    "이 엑셀 재무제표 숫자 맞는지 검토해줘"
+    "이 엑셀 재무제표 숫자 맞는지 검토해줘",
+    "이 엑셀 파일(.xlsx) 시트별 합계가 맞는지 수식으로 확인해 줘."
   ]
 }

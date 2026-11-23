@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from decimal import Decimal
+import math
 import os
 import re
 import subprocess
@@ -206,10 +207,23 @@ def read_workbook(path: Path) -> tuple[dict, dict]:
     return sheets, names
 
 
+FOOTNOTES = re.compile(r"^(?P<figure>.*?)(?P<markers>(?:\s*\((?:\*(?:[0-9]+(?:,[0-9]+)*)?|주[0-9]+(?:,[0-9]+)*)\))+)$")
+
+
 def figure(text: str):
     """The number and number format a table text should become, derived
-    independently of the CLI; None when it must stay text."""
+    independently of the CLI; None when it must stay text. Footnote markers
+    after a figure become a literal at the end of every format section."""
     t = text.strip()
+    m = FOOTNOTES.match(t)
+    if m and m["figure"].strip() and m["figure"].strip() != "-":
+        plain = figure(m["figure"].strip())
+        if plain is None:
+            return None
+        value, fmt = plain
+        return value, ";".join(f'{section}"{m["markers"]}"' for section in fmt.split(";"))
+    if m and m["figure"].strip() == "-":
+        return None
     if t == "-":
         return 0.0, '#,##0;-#,##0;"-"'
     m = FIGURE.match(t)
@@ -387,6 +401,302 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
             f"ok   {label}: xlsx {c['sheets']} sheets, {c['tables']} tables, {c['numberCells']} number and "
             f"{c['textCells']} text cells, {sum(expected.values())} text lines, {containers} nested-table container(s)"
         )
+    foot_smoke(label, src, sheets, names, tmp)
+
+
+CURRENCY = {"원": 1.0, "천원": 1e3, "백만원": 1e6, "억원": 1e8, "십억원": 1e9}
+# Units that are not money but compare with themselves (`foot::PLAIN_UNITS`).
+PLAIN_UNITS = {"주", "천주", "명", "개", "건", "회", "EA", "USD", "천USD", "EUR", "JPY", "CNY"}
+UNIT_CAPTION = re.compile(r"단위[:：]([^)）,，;\]]+)")
+
+
+def caption_unit(texts) -> str | None:
+    for text in texts:
+        m = UNIT_CAPTION.search(re.sub(r"\s", "", text))
+        if m:
+            return m.group(1)
+    return None
+
+
+def workbook_units(sheets: dict, names: dict) -> dict:
+    """Each table's unit as the workbook shows it, read independently of the
+    CLI: a caption in the table itself, else in the nearest row above it (a
+    caption line, or the caption of the table that row belongs to)."""
+    tables = {}
+    for name, (sheet, first, last) in names.items():
+        if name.startswith("DSD_T"):
+            tables[int(name[5:])] = (sheet, first, last)
+
+    def own(t):
+        sheet, (top, left), (bottom, right) = tables[t]
+        cells = sheets[sheet]
+        return caption_unit(
+            v[1] for (r, c), v in sorted(cells.items()) if top <= r <= bottom and left <= c <= right and v[0] == "s"
+        )
+
+    units = {}
+    for t, (sheet, (top, _left), _last) in tables.items():
+        unit = own(t)
+        if unit is None:
+            cells = sheets[sheet]
+            above = [r for (r, _c), v in cells.items() if 3 <= r < top and v != ("s", "")]
+            if above:
+                row = max(above)
+                holder = next((u for u, (s, f, l) in tables.items() if s == sheet and f[0] <= row <= l[0]), None)
+                if holder is not None:
+                    unit = own(holder)
+                else:
+                    unit = caption_unit(v[1] for (r, _c), v in cells.items() if r == row and v[0] == "s")
+        units[t] = unit
+    return units
+
+
+def format_places(fmt: str) -> int:
+    """Decimal places a number format shows (`foot::format_places`): a
+    percentage holds two more as a fraction."""
+    section = fmt.split(";")[0]
+    section = re.sub(r'"[^"]*"', "", section)
+    head, point, tail = section.partition(".")
+    digits = sum(1 for c in tail if c in "0#") if point else 0
+    return digits + (2 if "%" in section else 0)
+
+
+def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> None:
+    """Re-evaluate every proposed check from the exported workbook's cells,
+    independently of the CLI's arithmetic: same-table terms summed from the
+    typed cells, statuses and differences compared. Then re-state proposals
+    as agent checks in a checks file: each must apply in place with its
+    status unchanged. Prints counts only."""
+    envelope = dsd("foot", str(src))
+    if not envelope["ok"]:
+        fail(f"{label}: `foot` failed with {envelope['error']['code']}")
+        return
+    result = envelope["result"]
+
+    def value(table: int, row: int, col: int):
+        sheet, (top, left), _ = names[f"DSD_T{table}"]
+        got = sheets[sheet].get((top + row - 1, left + col - 1))
+        if got is None or got == ("s", ""):
+            return None
+        return got[1] if got[0] == "n" else "text"
+
+    def places(table: int, row: int, col: int) -> int:
+        sheet, (top, left), _ = names[f"DSD_T{table}"]
+        got = sheets[sheet].get((top + row - 1, left + col - 1))
+        return format_places(got[2]) if got and got[0] == "n" else 0
+
+    units = workbook_units(sheets, names)
+
+    def ratio(source: int, target: int):
+        """The factor converting table `source` into `target`'s unit, from
+        the captions the workbook shows; None when they cannot be compared."""
+        if source == target:
+            return 1.0
+        a, b = units.get(source), units.get(target)
+        if a and b and a in CURRENCY and b in CURRENCY:
+            return CURRENCY[a] / CURRENCY[b]
+        if a and a == b and a in PLAIN_UNITS:
+            return 1.0
+        return None
+
+    disagreements = 0
+    checks = result["checks"] + result["unresolved"] + result["candidates"]
+    for check in checks:
+        target = check["target"]
+        factors = [ratio(term["table"], target["table"]) for term in check["terms"]]
+        comparable = all(f is not None for f in factors)
+        actual, expected, text = value(target["table"], target["row"], target["col"]), 0.0, False
+        digits = places(target["table"], target["row"], target["col"])
+        for term, factor in zip(check["terms"], factors):
+            factor = factor or 1.0
+            rows, cols = term.get("rows", [term.get("row")] * 2), term.get("cols", [term.get("col")] * 2)
+            for row in range(rows[0], rows[1] + 1):
+                for col in range(cols[0], cols[1] + 1):
+                    got = value(term["table"], row, col)
+                    text |= got == "text"
+                    if isinstance(got, float):
+                        expected += term["sign"] * got * factor
+                        extra = round(-math.log10(factor)) if factor < 1 else 0
+                        digits = max(digits, places(term["table"], row, col) + extra)
+        if check["status"] == "needsJudgment":
+            # Text, an incomparable unit, or more places than the CLI compares (30).
+            ok = text or not isinstance(actual, float) or not comparable or digits > 30
+        else:
+            # Units come from the captions the workbook shows, not from the
+            # CLI's expected value; the difference is exact to the places the
+            # figures show.
+            if digits > 30:
+                ok = check["status"] == "needsJudgment"
+                disagreements += not ok
+                continue
+            difference = round(actual - expected, digits) + 0.0 if isinstance(actual, float) else None
+            allowed = check["allowed"]
+            holds = difference is not None and abs(difference) <= allowed
+            near = lambda a, b: abs(a - b) <= 1e-12 * max(1.0, abs(a), abs(b))  # noqa: E731
+            ok = (
+                comparable
+                and not text
+                and difference is not None
+                and near(check["actual"], actual)
+                and near(check["expected"], expected)
+                and abs(check["difference"] - difference) <= 10.0 ** -(digits + 1)
+                and (check["status"] == "pass") == holds
+            )
+        disagreements += not ok
+    counts = result["counts"]
+    tally = Counter(c["status"] for c in result["checks"])
+    consistent = (
+        (counts["pass"], counts["fail"], counts["needsJudgment"]) == (tally["pass"], tally["fail"], tally["needsJudgment"])
+        and counts["unresolved"] == len(result["unresolved"])
+        and counts["candidates"] == len(result["candidates"])
+        and counts["uncovered"] == len(result["uncovered"])
+        and len({c["id"] for c in checks}) == len(checks)
+    )
+    if disagreements:
+        fail(f"{label}: foot disagrees with the workbook on {disagreements} check(s)")
+    if not consistent:
+        fail(f"{label}: foot counts or ids are inconsistent")
+    overlaid = overlay_smoke(label, src, result["checks"], tmp)
+    formulas = footing_workbook_smoke(label, src, result["checks"], tmp)
+    if not disagreements and consistent and overlaid is not None and formulas is not None:
+        print(
+            f"ok   {label}: foot {counts['pass']} pass, {counts['fail']} fail, {counts['needsJudgment']} needing judgment, "
+            f"{counts['unresolved']} unresolved, {counts['candidates']} candidates, {counts['uncovered']} uncovered; "
+            f"re-evaluated from the workbook; {overlaid} re-stated in a checks file; "
+            f"{formulas} workbook formulas evaluated"
+        )
+
+
+def read_formulas(path: Path) -> dict:
+    """Formulas per sheet as {(row, col): formula without "="}."""
+    with zipfile.ZipFile(path) as zf:
+        book = ET.fromstring(zf.read("xl/workbook.xml"))
+        rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))}
+        out = {}
+        for sheet in book.iter(f"{XL}sheet"):
+            target = rels[sheet.get(f"{XL_REL}id")].lstrip("/")
+            target = target if target.startswith("xl/") else "xl/" + target
+            cells = {}
+            for c in ET.fromstring(zf.read(target)).iter(f"{XL}c"):
+                f = c.find(f"{XL}f")
+                if f is not None and f.text:
+                    cells[cell_position(c.get("r"))] = f.text
+            out[sheet.get("name")] = cells
+    return out
+
+
+REFERENCE = re.compile(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]+\$?\d+)(?::(\$?[A-Z]+\$?\d+))?")
+DIFFERENCE = re.compile(r"^ROUND\((?P<target>(?:'(?:[^']|'')+'!)?\$?[A-Z]+\$?\d+)-\((?P<terms>.*)\),(?P<places>-?\d+)\)$")
+TERM = re.compile(r"(?P<sign>[+-]?)(?:(?P<factor>[0-9.e+-]+)\*)?SUM\((?P<refs>[^)]+)\)")
+
+
+def evaluate_difference(formula: str, home: str, sheets: dict, formulas: dict):
+    """Evaluate `ROUND(target-(±[k*]SUM(refs)...),places)` or a reference to such a
+    cell, independently of the CLI, from the workbook's cell values. Returns
+    None for a formula of another shape."""
+
+    def resolve(ref: str):
+        m = REFERENCE.fullmatch(ref)
+        sheet = m.group(1).replace("''", "'") if m.group(1) else home
+        return sheet, cell_position(m.group(2)), cell_position(m.group(3)) if m.group(3) else None
+
+    def number(sheet, pos):
+        got = sheets.get(sheet, {}).get(pos)
+        return got[1] if got and got[0] == "n" else 0.0
+
+    if REFERENCE.fullmatch(formula):
+        sheet, pos, _ = resolve(formula)
+        inner = formulas.get(sheet, {}).get(pos)
+        return evaluate_difference(inner, sheet, sheets, formulas) if inner else None
+    m = DIFFERENCE.match(formula)
+    if m is None:
+        return None
+    sheet, pos, _ = resolve(m["target"])
+    total, rest = 0.0, m["terms"]
+    for term in TERM.finditer(rest):
+        part = 0.0
+        for ref in REFERENCE.finditer(term["refs"]):
+            s, first, last = resolve(ref.group(0))
+            last = last or first
+            part += sum(number(s, (r, c)) for r in range(first[0], last[0] + 1) for c in range(first[1], last[1] + 1))
+        factor = float(term["factor"]) if term["factor"] else 1.0
+        total += (-1 if term["sign"] == "-" else 1) * factor * part
+    return round(number(sheet, pos) - total, int(m["places"])) + 0.0
+
+
+def footing_workbook_smoke(label: str, src: Path, checks: list, tmp: Path):
+    """Write the footing workbook twice (byte-identical), then evaluate every
+    check's formula on the 검증 sheet from the workbook's own cells and
+    require the CLI's difference. Returns how many formulas were evaluated,
+    or None after a failure."""
+    out, again = tmp / "foot-a.xlsx", tmp / "foot-b.xlsx"
+    envelope = dsd("foot", str(src), "-o", str(out))
+    if not envelope["ok"] or not dsd("foot", str(src), "-o", str(again))["ok"]:
+        fail(f"{label}: `foot -o` failed")
+        return None
+    if out.read_bytes() != again.read_bytes():
+        fail(f"{label}: the footing workbook is not byte-identical across runs")
+        return None
+    sheets, _ = read_workbook(out)
+    formulas = read_formulas(out)
+    by_id = {c["id"]: c for c in checks}
+    name = list(sheets)[-1]  # the checks sheet is last
+    listing = sheets[name]
+    rows = sorted({r for (r, _c) in listing if r >= 3})
+    evaluated = wrong = 0
+    for r in rows:
+        check = by_id.get(listing.get((r, 2), ("s", ""))[1])
+        if check is None:
+            wrong += 1
+            continue
+        formula = formulas[name].get((r, 7))
+        if check["status"] == "needsJudgment" or formula is None:
+            wrong += formula is not None or listing.get((r, 9), ("s", ""))[1] != "판단 필요"
+            continue
+        got = evaluate_difference(formula, name, sheets, formulas)
+        if got is None:
+            wrong += 1
+            continue
+        # Both are rounded to the places the figures carry: they agree exactly.
+        wrong += abs(got - check["difference"]) > 1e-9 * max(1.0, abs(got))
+        evaluated += 1
+    if len(rows) != len(checks):
+        fail(f"{label}: the 검증 sheet lists {len(rows)} of {len(checks)} checks")
+        return None
+    if wrong:
+        fail(f"{label}: {wrong} footing workbook formula(s) disagree with `foot`")
+        return None
+    return evaluated
+
+
+def overlay_smoke(label: str, src: Path, checks: list, tmp: Path):
+    """Dismiss the first proposal and re-state the next ones as agent checks:
+    every entry's labels are where it says, so all apply and nothing moves.
+    Returns how many entries applied, or None after a failure."""
+    sample = checks[:41]
+    if len(sample) < 2:
+        return 0
+    overlay = {
+        "checks": [
+            {"id": c["id"], "kind": c["kind"], "origin": "agent", "target": c["target"], "terms": c["terms"], "note": "smoke"}
+            for c in sample[1:]
+        ],
+        "dismiss": [{"id": sample[0]["id"], "target": sample[0]["target"], "reason": "smoke"}],
+    }
+    path = tmp / "checks.json"
+    path.write_text(json.dumps(overlay, ensure_ascii=False), encoding="utf-8")
+    envelope = dsd("foot", str(src), "--checks", str(path))
+    if not envelope["ok"]:
+        fail(f"{label}: `foot --checks` failed with {envelope['error']['code']}")
+        return None
+    result = envelope["result"]
+    statuses = {c["id"]: (c["origin"], c["status"]) for c in result["checks"]}
+    applied = all(statuses.get(c["id"]) == ("agent", c["status"]) for c in sample[1:])
+    c = result["counts"]
+    if not applied or (c["dismissed"], c["moved"], c["stale"]) != (1, 0, 0) or sample[0]["id"] in statuses:
+        fail(f"{label}: a checks file re-stating proposals did not apply in place")
+        return None
+    return len(sample) - 1
 
 
 def corpus_smoke() -> None:

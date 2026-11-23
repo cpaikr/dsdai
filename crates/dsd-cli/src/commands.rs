@@ -63,6 +63,7 @@ pub fn run(command: Command) -> Outcome {
             compare(&base, &other, format, output.as_deref(), force, all, limit)
         }
         Command::Xlsx { file, output, force } => xlsx(&file, &output, force),
+        Command::Foot { file, checks, output, force } => foot(&file, checks.as_deref(), output.as_deref(), force),
         Command::Diff { original, edited, limit, raw, format } => diff(&original, &edited, limit, raw, format.format),
         Command::SetCell { file, write, target, col, text, unit_value, flatten } => {
             let src = read_archive(&file)?;
@@ -265,6 +266,48 @@ fn xlsx(file: &Path, out: &Path, force: bool) -> Outcome {
         "counts": model.counts,
     });
     Ok(Output::Json { result, warnings: model.warnings.into_iter().map(Warning::from).collect() })
+}
+
+fn foot(file: &Path, checks: Option<&Path>, out: Option<&Path>, force: bool) -> Outcome {
+    if out.is_some_and(|o| o.as_os_str() == "-") {
+        return Err(Error::invalid("a workbook is binary and is never written to stdout; pass -o PATH")
+            .with_hint("for example: dsd foot report.dsd -o footing.xlsx")
+            .into());
+    }
+    let doc = document(&read_archive(file)?)?;
+    let overlay = match checks {
+        Some(path) => {
+            let raw = std::fs::read(path).map_err(|e| Error::io(path, &e))?;
+            dsd::foot::ChecksFile::parse(&raw).map_err(|e| Error::invalid(format!("{}: {e}", path.display())))?
+        }
+        None => dsd::foot::ChecksFile::default(),
+    };
+    let mut report = dsd::foot::foot_with(&doc, &overlay);
+    let mut warnings: Vec<Warning> = std::mem::take(&mut report.warnings).into_iter().map(Warning::from).collect();
+    let mut result = serde_json::to_value(&report).expect("results serialize");
+    if let Some(out) = out {
+        let inputs: Vec<&Path> = std::iter::once(file).chain(checks).collect();
+        guard_output(out, force, &inputs)?;
+        if inputs.iter().any(|i| same_file(out, i)) {
+            return Err(Failure::new(ErrorCode::OutputExists, "refusing to write the workbook over an input"));
+        }
+        let (model, bytes) = dsd::foot::render(&doc, &report)?;
+        atomic_write(out, &bytes)?;
+        let tables: Vec<Value> = model
+            .placements
+            .iter()
+            .map(|p| json!({"table": p.table, "sheet": model.sheets[p.sheet].name, "range": p.range(), "name": p.name()}))
+            .collect();
+        result["workbook"] = json!({
+            "output": out.display().to_string(),
+            "bytes": bytes.len(),
+            "sha256": sha256_hex(&bytes),
+            "sheets": model.sheets.len(),
+            "tables": tables,
+        });
+        warnings.extend(model.warnings.into_iter().map(Warning::from));
+    }
+    Ok(Output::Json { result, warnings })
 }
 
 fn table(file: &Path, numbers: &[usize], spans: bool, format: Format) -> Outcome {

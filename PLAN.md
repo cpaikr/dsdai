@@ -16,9 +16,9 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 
 | Item | State |
 |---|---|
-| Branch | `feat/xlsx-export`, open as PR #18 (review threads resolved, CI green). Next action: owner merges it |
+| Branch | `feat/footing`, in PR #20 (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | Not started. Next action: step 2.1 (settle the open decisions with the owner) |
+| Phase 2 | Done (owner signed off 2026-11-23); PR #20 reviewed by Codex and CodeRabbit, all threads resolved |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -281,13 +281,14 @@ stays text, exactly as `dsd table` reports it, including leading spaces.
 | `12.50` | 12.5 | decimals kept (`#,##0.00` / `0.00`) |
 | `12.5%` | 0.125 | `0.0%` |
 | `-` alone | 0 | displays `-` |
+| `1,234 (*1)`, `500(주2)` | 1234 | marker kept as a literal: `#,##0" (*1)"` (since 2.2) |
 
 Kept as text: invalid grouping (`5,6,32`), leading zeros, more than 15
-significant digits, an explicit `+`, a number with a footnote marker or any
+significant digits, an explicit `+`, a marker before the figure or any
 other text, dates, and empty cells (left empty). Numbers are right-aligned.
 
-Footnote-marked amounts (`1,234 (*1)`) stay text in Phase 1. Phase 2 needs
-them as numbers; decide there whether to carry the marker in the format.
+Footnote-marked amounts (`1,234 (*1)`) stayed text in Phase 1. Since step
+2.2 they are numbers whose format carries the marker (see Phase 2 decisions).
 
 ### Provenance
 
@@ -392,7 +393,7 @@ Every check is `target = Σ sign × term`, over cells addressed by `T/R/C`:
   "id": "T13.R3.C4",
   "kind": "vertical | horizontal | movement | cross | identity",
   "origin": "auto | agent",
-  "target": {"table": 13, "row": 3, "col": 4, "label": "…"},
+  "target": {"table": 13, "row": 3, "col": 4, "rowLabel": "…", "colLabel": "…"},
   "terms": [{"sign": 1, "table": 13, "rows": [4, 8], "col": 3}],
   "note": "why this relation holds (agent checks)"
 }
@@ -449,29 +450,231 @@ uncovered → inspect tables → write the overlay → rerun → report true
 differences with `T/R/C` and amounts) linked from `SKILL.md`. The agent
 reports differences; it changes figures only when asked.
 
-### Open decisions (settle at Phase 2 start)
+### Decisions (settled with the owner, 2026-11-18)
 
-- Rounding tolerance for documents in thousands or millions: zero, a fixed
-  ±1 per term, or stated per check.
-- Unit conversion in cross checks between tables in different units.
-- How far statement ↔ note matches are asserted automatically versus offered
-  as candidates.
-- Footnote-marked amounts as numbers (see Phase 1 cell typing).
-- Whether a checks file from one draft is re-applied to the next by
-  coordinates, by labels, or both; and the exact overlay schema.
+- **Tolerance:** a check passes only when its difference is exactly 0. A
+  check may state its own tolerance (for example ±1 per term in a document
+  in thousands), so every allowance is explicit and shown with the result.
+- **Units:** the CLI reads each table's unit from its caption
+  (`(단위: 원)`, `천원`, `백만원`, in the table or the line just before it)
+  and converts before comparing tables in different units. A check whose
+  unit cannot be determined is reported as needing judgment, not evaluated.
+- **Statement ↔ note:** when a named note holds the same amount for both
+  periods, the CLI records an auto check that passes. Anything else is
+  offered as a candidate for the agent, never reported as an error.
+- **Footnote-marked amounts:** `1,234 (*1)` becomes the number 1234 with a
+  number format that shows the marker (`#,##0" (*1)"`), so the cell still
+  reads exactly as the source and formulas can use it. This changes Phase 1
+  output for those cells; the display-fidelity rule is unchanged.
+- **Re-applying a checks file:** a check finds its cells by `T/R/C` first and
+  verifies the stored labels there. When they no longer match, the CLI looks
+  for the same labels nearby and reports the check as moved or stale instead
+  of evaluating the wrong cells.
+
+Recorded during implementation:
+
+- **2.2 scope.** The model and evaluator live in `crates/dsd/src/foot.rs`
+  as a library API; the `dsd foot` command arrives with the first proposer
+  (2.3), when a run has checks to report.
+- **Evaluation rules (2.2).** A blank cell counts as 0 in a sum; a nil dash
+  is 0; a text cell in a term, a blank target, or a cell outside its table
+  makes the check need judgment, with a reason naming the cell. A spanning
+  cell covering several positions of a term is summed once. A per-term
+  tolerance allows that amount for every cell the terms sum. Differences
+  within 10⁻⁹ of the larger value (binary rounding of decimals) pass.
+- **Units (2.2).** A table's unit is its own caption, else the caption in
+  the block just before it (a unit line, or a small caption table, which is
+  how statements and notes carry it); a caption names its unit after a colon
+  (`단위:`). Currency units convert (원, 천원, 백만원, 억원, 십억원); other
+  units (주, 명, USD) compare only with the same unit. Some corpus tables
+  with figures have no detected unit, so their cross-table checks need
+  judgment.
+- **Labels (2.2).** A row's label is its first text that is not a figure;
+  a column's is its header cells (`TH` rows from the top) joined with ` / `,
+  else the first row's text.
+
+- **In-table proposers (2.3).** Each table is read as figures by period
+  group: one figure column, or a statement's detail/subtotal pair (two
+  adjacent columns under one heading spanning exactly them, never both
+  non-zero in a row). Columns of note references (`주석`), rates (`…율`,
+  `…률`), prices, averages, issue numbers, dates, and percentages are never
+  summed. A row's level is its pair column, then its numbering
+  (Ⅰ. > 1. > 가. > (1) > ① > (가)), then indentation.
+- **Choosing a structure (2.3).** A target gets candidate structures in a
+  fixed order and keeps the one holding in the most period groups, counting
+  only groups where something is non-zero; the structure is then applied to
+  every group, so a difference in one period fails instead of hiding. A
+  labelled total (합계, 소계, 총계, `… 계`, a top-level closing balance) or a
+  numbered breakdown that nothing explains is unresolved with the closest
+  candidate; a breakdown implied only by indentation, a signed chain of
+  statement lines, or an unlabelled total column is kept only when it holds
+  with two non-zero parts (a chain in every period, a column in more than
+  half its rows). A lone `-`
+  under non-zero parts is a total left out, not a check. An opening row
+  repeats the closing above it only across a year end.
+- **Check ids (2.3).** `v:` (down a column), `h:` (across a row), `i:` (the
+  balance identity), or `x:` (across tables or periods; a statement-note
+  check adds `/T#` of its note table) with the target `T#.R#.C#`; a repeat gets `#2`.
+- **Statement ↔ note (2.3).** A statement table is one the workbook model
+  puts on a statement sheet; a note's tables are those on its note sheet. A
+  line names its notes in a 주석 column or a `(주4)` label. Its amounts are
+  looked for in every figure cell of those notes' tables, converted between
+  known units; one note row holding both periods side by side is preferred,
+  then a row with the line's label, then a total row. Both periods found:
+  checks (auto), as settled. One period (including a line showing only
+  one): `candidates`, a new report list, evaluated but never errors. None,
+  while the note has tables: uncovered (`cross`). A note the document does
+  not hold is skipped; a workbook model that fails (an Excel limit) skips
+  the matching with a `statement-notes-skipped` warning.
+- **Prior closings (2.3).** Asserted, since an opening balance is the prior
+  closing: within a table with a current and a prior period column (named
+  by 당기/전기, or a statement's two columns in order), each top-level
+  opening row against the next closing row; across tables, a current and a
+  prior table with the same figure columns, named by their header or the
+  caption just before them (a unit caption between keeps the period), row
+  by row or column by column by label (a label repeated on either side, such
+  as two 소계 rows, is not paired). Within a table the two periods must be
+  named; two unnamed columns of a note are usually two items. A prior interim period (분기, 반기)
+  is never compared, since the next period opens from the prior year end.
+- **Checks file (2.4).** `dsd foot FILE --checks CHECKS` reads
+  `{"checks": [...], "dismiss": [...]}` (both optional, nothing else). A
+  check needs `origin: "agent"`, a `note`, at least one term, and no `rule`;
+  it replaces the proposal with its id at its target (an unresolved total
+  or a candidate included; a replaced check keeps its place) or else adds a
+  check. A `#2` id names the second proposal at one cell in emission order. A dismissal is `{id, target, reason}` and removes the proposal with
+  that id at that target, listed in `result.dismissed`. Ids are unique across
+  the file. A file that is not a JSON object, has unknown fields, or breaks
+  these rules fails with `invalid_argument` naming the entry
+  (`checks[2] (a:1): ...`); an unreadable file is `io_error`. An agent check
+  on an uncovered cell covers it.
+- **Re-application (2.4).** Targets carry `rowLabel`, `colLabel`, and
+  `section`, the title of the workbook sheet the table is on (`재무상태표`,
+  `4. 현금및현금성자산`), which anchors the table: note tables share generic
+  labels, so labels alone let an inserted table capture an entry. This is
+  the model's `CellRef`, also the shape of every result target, so an agent
+  copies a target from a result. Labels and sections compare without
+  spacing and one leading list marker (`Ⅰ.`, `1.`, `(1)`, `가.`), so a
+  renumbered note still matches, but otherwise exactly (`2024년` ≠ `2025년`,
+  `(원화)` ≠ `(외화)`); an unstated label or section matches anything. An
+  entry applies when its labels and section are at its `T/R/C`. Otherwise
+  it is `moved` with `found` when they are at exactly one other cell (in its
+  section, else within three tables), and `stale` with a reason when they
+  are nowhere or at several cells; both list what the stated cell holds now
+  (`there`) and neither applies, so the proposal it targeted stands. A
+  dismissal whose proposal is gone is stale too. Limits: two tables with the
+  same labels in one section can trade places unseen, and only the target
+  is verified, so a row inserted inside a term's range changes the sum
+  (which shows as a failure).
+- **Footing workbook (2.5).** `dsd foot FILE [--checks C] -o OUT [--force]`
+  writes the `dsd xlsx` workbook plus checks, following the reference
+  workbook's convention. Each check is a difference formula,
+  `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),k)` (the factor converts units;
+  `k` is the decimal places the figures show, as the evaluator rounds), formatted `General;-General;"✓"` (0 shows ✓) and red outside
+  its allowance by conditional format. Every position is read through the
+  cell that owns it, as the CLI reads it: a target inside a span refers to
+  the merge's first cell, and a term range a span enters from outside lists
+  its owning cells (`SUM(B7,C8)`). A check down a table (any check whose
+  terms are not all in the target's row) sits in a check row below the
+  table, in the target's column; check rows follow their target rows, one
+  blank row after the table, and the content below moves down by them. A
+  check across a row sits in a check column right of the table (after the
+  T# marker), in the target's row. Grey labels name each check row
+  (`검증 R20 자산총계 (auto)`) and column (`차이 C7 합계 (auto/agent)`). A new
+  last sheet `검증` lists every check (시트, 위치, ID, 종류, 출처, 규칙, 대상,
+  차이, 허용, 결과, 비고): its 차이 refers to the in-table cell, or holds the
+  formula of a check between tables; 결과 is `IF(ABS(차이)<=허용,"통과","차이")`,
+  and a check needing judgment has no formula, 결과 `판단 필요`, and its reason.
+  총괄표 gains 검증/통과/차이/판단 필요 columns per sheet by `COUNTIFS` over
+  검증's listed rows (the sheet name matched as a literal, `"=name"`), and a
+  합계 row, so counts follow corrections typed into the workbook. A check on
+  a table the workbook does not place counts only in 합계. Every formula carries the CLI's result, so a reader that does
+  not recalculate shows the same values, and the output is byte-identical
+  across runs. `result.workbook` gives the output, size, sha256, sheet
+  count, and each table's range in this workbook. `dsd xlsx` output is
+  unchanged. Unresolved totals, candidates, and uncovered cells are not
+  rendered; they stay in the JSON for the agent.
+- **Gate findings (2.7).** Comparing with the reference workbook on the
+  working sample found three proposer gaps, now fixed:
+  - **Percentages:** a percentage cell is a figure that never sums. A rate
+    row under a column of amounts used to take the whole column out of
+    every sum.
+  - **Dashes over netting parts:** a lone `-` over parts that net to zero
+    is a total of zero, not a total left out.
+  - **Unlabelled total columns:** these need at least two holding rows
+    whose total is not 0. Rows that net to zero beside a dash had made a
+    coincidence look like a total.
+
+  Movement schedules: wherever the reference workbook reports a
+  difference (its formulas leave out the opening column), the matching
+  checks here pass.
+- **Review fixes (PR #20).**
+  - **Exact decimal comparison:** a difference is rounded to the decimal
+    places its figures show (after unit conversion and percentages; a
+    check whose figures need more than 30 needs judgment) and passes only within its allowance, compared exactly as the
+    workbook's result formula compares it. Figures are decimals, so this removes binary
+    noise and nothing else at any magnitude: 1 at 5×10¹³ fails. The
+    workbook formula rounds to those places or more (down to the 15th
+    significant digit of the largest checked amount, a workbook number's
+    precision), so an edit with more decimals still shows, and `check.py` reads them
+    from the cells' number formats. This replaces a relative 10⁻⁹, which
+    hid a 500 difference at 10¹².
+  - **Units:** a unit that is not money compares only with itself, and only
+    when it is a known one (주, 천주, 명, 개, 건, 회, EA, USD, 천USD, EUR, JPY,
+    CNY).
+  - **Missing structure:** a period whose parts hold text is stated, and
+    evaluates to `needsJudgment`. A labelled total that no candidate can be
+    read for is `uncovered`.
+  - **Spans:** covered positions are not terms.
+  - **Unlabelled columns:** the majority is counted over rows whose total
+    is not 0.
+  - **Statement ↔ note:** a note column headed with the other period never
+    matches. One note cell cannot confirm both periods; those stay
+    candidates, unless another distinct pair exists.
+  - **Prior closings:** pairs stay within one section, share the line
+    describing their schedule (the last line before them that is not only a
+    period or a unit, so `당기 취득원가` names its schedule), pair only when
+    each is the other's one fitting table nearby, and pass over a prior
+    interim table.
+  - **Re-application:** a Roman numeral is a marker only before `.` or
+    `)`. An entry naming a section needs the document to name the
+    same one.
+  - **check.py:** unit factors are taken from the captions the workbook
+    shows, not from the CLI's reported expected value.
+- **Column labels (2.3).** A unit caption heading the whole table is not
+  part of a column label (it had made every label start `(단위: 원) /`).
+- **Corpus (2.3).** Each proposer is measured on every private sample for
+  pass, fail, unresolved, and uncovered counts; the counts are reported to the
+  owner, not recorded here, since they derive from confidential documents.
+  Remaining failures are rounding in tables in larger units and differences
+  the documents carry; `check.py` re-evaluates every check from the exported
+  workbook.
 
 ### Steps (outline)
 
-- [ ] 2.1 Settle the open decisions with the owner.
-- [ ] 2.2 Check model, evaluation, and the JSON result.
-- [ ] 2.3 Proposers, one at a time, each measured on the private corpus for
-  pass / unresolved / uncovered counts.
-- [ ] 2.4 Checks file: schema, merge, validation errors.
-- [ ] 2.5 Workbook rendering of checks and live counts.
-- [ ] 2.6 Skill reference, evals, and docs.
-- [ ] 2.7 Gate: on the working sample, the false positives the reference
+- [x] 2.1 Settle the open decisions with the owner.
+- [x] 2.2 Check model, evaluation, and the JSON result: `T/R/C` terms
+  resolved through the Phase 1 placements, values read with the Phase 1
+  typing (plus footnote-marked amounts, which also change the workbook and
+  `check.py`'s independent parse), per-check tolerance, unit detection and
+  conversion, and labels stored beside coordinates.
+- [x] 2.3 Proposers, one at a time, each measured on the private corpus for
+  pass / unresolved / uncovered counts: `dsd foot` with label totals,
+  hierarchy (statement subtotal columns included), signed statement chains,
+  movements in rows and columns, total columns, the balance identity,
+  statement ↔ note, and prior closings.
+- [x] 2.4 Checks file: schema, merge, validation errors, and re-application
+  by coordinates verified by labels (moved and stale checks).
+- [x] 2.5 Workbook rendering of checks and live counts.
+- [x] 2.6 Skill reference, evals, and docs: `references/footing.md` (model,
+  workflow from run to report, checks-file example), routed from `SKILL.md`
+  and the Excel section of `reading.md`; eval 11 and a trigger pair.
+- [x] 2.7 Gate: on the working sample, the false positives the reference
   workbook reports in movement schedules do not appear, every remaining
-  difference is explained, and the owner signs off.
+  difference is explained, and the owner signs off. Signed off 2026-11-23:
+  no movement-schedule false positive of the reference workbook appears,
+  the one remaining difference is a true difference in the document, and
+  the gate report (kept with the sample, outside the repository) explains
+  every other item.
 
 ## Not planned here
 
