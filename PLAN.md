@@ -16,9 +16,10 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 
 | Item | State |
 |---|---|
-| Branch | `feat/footing`, in PR #20 (Phase 1 merged to `main` with PR #18) |
+| Branch | None open: both phases are on `main` (Phase 1 with PR #18, Phase 2 with PR #20) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | Done (owner signed off 2026-11-23); PR #20 reviewed by Codex and CodeRabbit, all threads resolved |
+| Phase 2 | Done (owner signed off 2026-11-23); PR #20 reviewed by Codex and CodeRabbit, all threads resolved, merged 2026-11-23 |
+| Release | Not released; follows [docs/release.md](docs/release.md) when the owner asks |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
