@@ -524,7 +524,7 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
             # Units come from the captions the workbook shows, not from the
             # CLI's expected value; the difference is exact to the places the
             # figures show.
-            digits = min(digits, 15)
+            digits = min(digits, 30)
             difference = round(actual - expected, digits) + 0.0 if isinstance(actual, float) else None
             allowed = check["allowed"]
             holds = difference is not None and abs(difference) <= allowed

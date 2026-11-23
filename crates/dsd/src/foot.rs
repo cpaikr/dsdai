@@ -244,6 +244,9 @@ pub struct CheckResult {
     /// the difference is rounded; for rendering, not the result.
     #[serde(skip)]
     pub places: u32,
+    /// Σ |values| of the target and the summed cells; for rendering.
+    #[serde(skip)]
+    pub magnitude: f64,
     /// The target table's unit caption, when found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -421,12 +424,13 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
         allowed: 0.0,
         cells: 0,
         places: 0,
+        magnitude: 0.0,
         unit: units.get(t.table.wrapping_sub(1)).cloned().flatten().map(|u| u.text),
         reason: None,
         note: check.note.clone(),
     };
     match compute(doc, units, check) {
-        Ok((actual, expected, cells, places)) => {
+        Ok((actual, expected, cells, places, magnitude)) => {
             let allowed = match check.tolerance {
                 None => 0.0,
                 Some(Tolerance::Absolute(a)) => a.abs(),
@@ -440,15 +444,17 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
             result.allowed = allowed;
             result.cells = cells;
             result.places = places;
+            result.magnitude = magnitude;
         }
         Err(reason) => result.reason = Some(reason),
     }
     result
 }
 
-/// Most decimal places a difference is computed to: a figure holds at most
-/// 15 significant digits.
-const MAX_PLACES: u32 = 15;
+/// Most decimal places a difference is computed to: a figure's own places
+/// (at most 15 significant digits, so up to 16 after the point), two more
+/// for a percentage, and up to 9 more for a unit conversion.
+const MAX_PLACES: u32 = 30;
 
 /// `x` rounded to `places` decimals, without a negative zero. Figures are
 /// decimals, so their exact difference has no more places than they do; the
@@ -490,9 +496,9 @@ fn scaled_places(places: u32, scale: f64) -> u32 {
     (places + extra).min(MAX_PLACES)
 }
 
-/// (actual, expected, cells summed, decimal places), or why the check
-/// cannot be evaluated.
-fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize, u32), String> {
+/// (actual, expected, cells summed, decimal places, Σ |values|), or why the
+/// check cannot be evaluated.
+fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize, u32, f64), String> {
     let t = &check.target;
     let (actual, mut places) = match read(doc, t.table, t.row, t.col)? {
         Read::Number(v, p) => (v, p),
@@ -509,6 +515,7 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
         }
     }
     let mut expected = 0.0;
+    let mut magnitude = actual.abs();
     let mut cells = 0;
     for term in &check.terms {
         let scale = scale(units, term.table, t.table)?;
@@ -525,11 +532,12 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
                 if let Read::Number(v, p) = read(doc, term.table, cell.row, cell.col)? {
                     expected += f64::from(term.sign) * v * scale;
                     places = places.max(scaled_places(p, scale));
+                    magnitude += (v * scale).abs();
                 }
             }
         }
     }
-    Ok((actual, expected, cells, places.min(MAX_PLACES)))
+    Ok((actual, expected, cells, places.min(MAX_PLACES), magnitude))
 }
 
 enum Read {
@@ -822,6 +830,13 @@ mod tests {
         assert_eq!(evaluate(&d, &[c.clone()]).checks[0].status, Status::Fail);
         c.tolerance = Some(Tolerance::Absolute(0.1));
         assert_eq!(evaluate(&d, &[c]).checks[0].status, Status::Pass);
+    }
+
+    #[test]
+    fn a_difference_at_the_sixteenth_place_still_fails() {
+        let d = doc(&table(&["과 목", "당기"], &[&["가", "0"], &["나", "0.0000000000000001"]]));
+        let r = &evaluate(&d, &[check("c", (1, 3, 2), vec![term(1, 1, (2, 2), 2)])]).checks[0];
+        assert_eq!((r.status, r.difference), (Status::Fail, Some(1e-16)));
     }
 
     #[test]

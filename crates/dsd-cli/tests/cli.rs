@@ -2041,3 +2041,26 @@ fn foot_reports_an_entry_moved_when_quarter_columns_trade_places() {
         (Some(3), Some("Ⅱ 분기"))
     );
 }
+
+#[test]
+fn foot_pairs_prior_closings_only_when_each_table_has_one_fit() {
+    let w = Work::new("foot-ambiguous");
+    let movement = |caption: &str, open: &str, close: &str| {
+        format!(
+            "<P>{caption}</P>\r\n<P>(단위: 원)</P>\r\n<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>기초</TH><TH>증가</TH><TH>기말</TH></TR></THEAD><TBODY><TR><TD>토지</TD><TD>{open}</TD><TD>10</TD><TD>{close}</TD></TR></TBODY></TABLE>\r\n"
+        )
+    };
+    let note = |tables: &[String]| {
+        format!("<SECTION-2><TITLE>주 석</TITLE>\r\n<P>유형자산</P>\r\n{}</SECTION-2>\r\n", tables.concat())
+    };
+    let run = |name: &str, tables: &[String]| {
+        let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{}", note(tables)));
+        let r = dsd(["foot", &s(&w.variant(name, &xml))]).ok();
+        r["checks"].as_array().unwrap().iter().filter(|c| c["rule"] == "prior-closing").count()
+    };
+    let current = movement("(1) 당기 취득원가", "100", "110");
+    let prior = movement("(2) 전기 취득원가", "90", "100");
+    assert_eq!(run("one.dsd", &[current.clone(), prior.clone()]), 1, "one current and one prior table pair");
+    assert_eq!(run("two.dsd", &[current.clone(), current, prior]), 0, "the prior table fits two: ambiguous");
+}

@@ -200,9 +200,19 @@ fn formula(
         }
         let _ = write!(f, "SUM({range})");
     }
-    // The places the figures carry, as the evaluator rounds the difference.
-    let _ = write!(f, "),{})", check.places);
+    let _ = write!(f, "),{})", places(check));
     Some(f)
+}
+
+/// The places a difference formula rounds to: those the figures carry (as
+/// the evaluator rounds), or more while binary noise stays below them, so a
+/// value typed into the workbook with more decimals still shows (14
+/// significant digits of the checked amounts).
+fn places(check: &CheckResult) -> u32 {
+    // log10 of a finite magnitude of at least 1: a whole number below 310.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let digits = check.magnitude.max(1.0).log10().ceil() as u32;
+    check.places.max(14u32.saturating_sub(digits))
 }
 
 fn cell(row: u32, col: u16, value: Value, role: Role) -> Cell {
@@ -491,12 +501,12 @@ mod tests {
         assert_eq!(
             formulas(sheet),
             pairs(&[
-                ("F7", "ROUND(D7-(SUM(B7:C7)),0)"),
-                ("F8", "ROUND(D8-(SUM(B8:C8)),0)"),
-                ("F9", "ROUND(D9-(SUM(B9:C9)),0)"),
-                ("B11", "ROUND(B9-(SUM(B7:B8)),0)"),
-                ("C11", "ROUND(C9-(SUM(C7:C8)),0)"),
-                ("D11", "ROUND(D9-(SUM(D7:D8)),0)"),
+                ("F7", "ROUND(D7-(SUM(B7:C7)),13)"),
+                ("F8", "ROUND(D8-(SUM(B8:C8)),12)"),
+                ("F9", "ROUND(D9-(SUM(B9:C9)),12)"),
+                ("B11", "ROUND(B9-(SUM(B7:B8)),13)"),
+                ("C11", "ROUND(C9-(SUM(C7:C8)),12)"),
+                ("D11", "ROUND(D9-(SUM(D7:D8)),12)"),
             ])
         );
         assert_eq!(shown(sheet, "A11"), "검증 R4 합 계 (auto)");
@@ -546,7 +556,7 @@ mod tests {
         ));
         let (wb, _) = render(&d, &foot(&d)).unwrap();
         let listed = formulas(wb.sheets.last().unwrap());
-        assert_eq!(listed[0], ("H4".to_owned(), "ROUND('재무상태표'!C9-(1000*SUM('주석4'!B8)),0)".to_owned()));
+        assert_eq!(listed[0], ("H4".to_owned(), "ROUND('재무상태표'!C9-(1000*SUM('주석4'!B8)),7)".to_owned()));
     }
 
     #[test]
@@ -609,7 +619,7 @@ mod tests {
         let (wb, _) = render(&d, &report).unwrap();
         let listed = formulas(&wb.sheets[1]);
         // The target C7 is inside the B7:C7 merge; so is the second term.
-        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),0)");
+        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),12)");
     }
 
     #[test]
@@ -658,6 +668,15 @@ mod tests {
         let (wb, _) = render(&d, &report).unwrap();
         let listed = formulas(&wb.sheets[1]);
         assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),0)", "rounded to the places the figures carry");
+    }
+
+    #[test]
+    fn a_decimal_typed_into_an_integer_check_still_shows() {
+        // Integer figures: the formula keeps places beyond 0, so an edit to 0.9 shows.
+        let d = doc(&table(&["구 분", "당기"], &[&["가", "1"], &["합 계", "1"]]));
+        let (wb, _) = render(&d, &foot(&d)).unwrap();
+        let listed = formulas(&wb.sheets[1]);
+        assert_eq!(listed[0].1, "ROUND(B6-(SUM(B5)),13)");
     }
 
     #[test]

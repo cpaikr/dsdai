@@ -259,37 +259,37 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
     // A pair stays within one section (note or statement), so neighbouring
     // schedules of other notes are never compared.
     let sections = crate::foot::table_sections(doc);
-    let mut paired = vec![false; grids.len()];
-    for (i, a) in grids.iter().enumerate() {
-        let Some(a) = a else { continue };
-        if paired[i] {
+    // Two tables fit when they are in one section, share their schedule's
+    // description (so two schedules of one note are never compared), name
+    // opposite periods (the prior one a year end), and have the same columns
+    // (당기 취득원가 with 전기 취득원가, even when 당기 감가상각누계액 sits
+    // between them), within a few tables of each other.
+    let fits = |i: usize, j: usize| -> bool {
+        let (Some(a), Some(b)) = (&grids[i], &grids[j]) else { return false };
+        let (Some((pa, ia)), Some((pb, ib))) = (periods[i], periods[j]) else { return false };
+        let year_end = |p: Period, interim: bool| !(p == Period::Prior && interim);
+        i.abs_diff(j) < 7
+            && sections[i].is_some()
+            && sections[j] == sections[i]
+            && headings[i].is_some()
+            && headings[j] == headings[i]
+            && pa != pb
+            && year_end(pa, ia)
+            && year_end(pb, ib)
+            && shape(a) == shape(b)
+    };
+    let fitting = |i: usize| -> Vec<usize> {
+        (i.saturating_sub(6)..grids.len().min(i + 7)).filter(|&j| j != i && fits(i, j)).collect()
+    };
+    for i in 0..grids.len() {
+        // A pair only when each is the other's one fitting table: two
+        // candidates on either side leave the schedule ambiguous.
+        let [j] = fitting(i)[..] else { continue };
+        if j < i || fitting(j) != [i] {
             continue;
         }
-        let Some((pa, interim_a)) = periods[i] else { continue };
-        // A prior interim period's closing is not the next opening.
-        if pa == Period::Prior && interim_a {
-            continue;
-        }
-        // The other period's table: the nearest one after it in its section,
-        // naming the other period (a year end, when it is the prior one) with
-        // the same columns (당기 취득원가 with 전기 취득원가, even when 당기
-        // 감가상각누계액 sits between them).
-        let mut partners = (i + 1..grids.len().min(i + 7)).filter(|&j| {
-            !paired[j]
-                && sections[i].is_some()
-                && sections[j] == sections[i]
-                // The same schedule: one description heads both periods'
-                // tables, so two schedules of one note are never compared.
-                && headings[i].is_some()
-                && headings[j] == headings[i]
-                && periods[j].is_some_and(|(p, interim)| p != pa && !(p == Period::Prior && interim))
-                && grids[j].as_ref().is_some_and(|b| shape(b) == shape(a))
-        });
-        // Two equally fitting partners leave the schedule's identity ambiguous.
-        let (Some(j), None) = (partners.next(), partners.next()) else { continue };
-        let Some(b) = &grids[j] else { continue };
-        paired[j] = true;
-        let (current, prior) = if pa == Period::Current { (a, b) } else { (b, a) };
+        let (Some(a), Some(b)) = (&grids[i], &grids[j]) else { continue };
+        let (current, prior) = if periods[i].is_some_and(|(p, _)| p == Period::Current) { (a, b) } else { (b, a) };
         across_columns(current, prior, out);
         across_rows(current, prior, out);
     }
@@ -630,6 +630,19 @@ mod tests {
     }
 
     #[test]
+    fn a_pair_needs_each_table_to_be_the_other_s_only_fit() {
+        // Two current tables before one prior table: the prior table fits both.
+        let movement = |rows: &[&[&str]]| table(&["구 분", "기초", "증가", "기말"], rows);
+        let d = doc(&format!(
+            "<P>유형자산</P><P>(1) 당기 취득원가</P><P>(단위: 원)</P>{}<P>(1) 당기 취득원가</P><P>(단위: 원)</P>{}<P>(2) 전기 취득원가</P><P>(단위: 원)</P>{}",
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "90", "10", "100"]]),
+        ));
+        assert!(cross(&foot(&d)).is_empty(), "{:?}", cross(&foot(&d)));
+    }
+
+    #[test]
     fn a_distinct_pair_is_found_when_the_best_hits_coincide() {
         // Both periods are 100; one note row holds 100 twice in different rows' cells.
         let r = foot(&statement_and_note(("100", "100"), ("구분A", "구분B"), ("100", "-")));
@@ -648,7 +661,7 @@ mod tests {
     fn paired_movement_tables_open_with_the_prior_closing() {
         let movement = |rows: &[&[&str]]| table(&["구 분", "기초", "취득", "기말"], rows);
         let d = doc(&format!(
-            "<P>유형자산의 변동내역은 다음과 같습니다.</P><P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전기</P><P>(단위: 원)</P>{}<P>(1) 당분기</P><P>(단위: 원)</P>{}<P>(2) 전분기</P><P>(단위: 원)</P>{}",
+            "<P>유형자산의 변동내역은 다음과 같습니다.</P><P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전기</P><P>(단위: 원)</P>{}<P>분기 중 변동내역은 다음과 같습니다.</P><P>(1) 당분기</P><P>(단위: 원)</P>{}<P>(2) 전분기</P><P>(단위: 원)</P>{}",
             movement(&[&["토지", "100", "10", "110"], &["건물", "50", "5", "55"]]),
             movement(&[&["토지", "90", "10", "100"], &["건물", "40", "5", "45"]]),
             movement(&[&["토지", "100", "10", "110"]]),
