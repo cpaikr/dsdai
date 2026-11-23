@@ -421,16 +421,15 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
         note: check.note.clone(),
     };
     match compute(doc, units, check) {
-        Ok((actual, expected, cells)) => {
+        Ok((actual, expected, cells, magnitude)) => {
             let allowed = match check.tolerance {
                 None => 0.0,
                 Some(Tolerance::Absolute(a)) => a.abs(),
                 Some(Tolerance::PerTerm(p)) => p.abs() * cells as f64,
             };
             let difference = actual - expected;
-            // Room for binary rounding of decimal figures, far below any displayed digit.
-            let epsilon = 1e-9 * actual.abs().max(expected.abs()).max(1.0);
-            result.status = if difference.abs() <= allowed + epsilon { Status::Pass } else { Status::Fail };
+            let slack = rounding_slack(magnitude);
+            result.status = if difference.abs() <= allowed + slack { Status::Pass } else { Status::Fail };
             result.actual = Some(actual);
             result.expected = Some(expected);
             result.difference = Some(difference);
@@ -442,8 +441,17 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
     result
 }
 
-/// (actual, expected, cells summed), or why the check cannot be evaluated.
-fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize), String> {
+/// How far binary rounding of decimal figures can move a sum whose values
+/// add up to `magnitude` in absolute terms: a few units in the last place,
+/// so a difference of one displayed unit is never absorbed (it is under
+/// 0.02 at 10¹²).
+pub(crate) fn rounding_slack(magnitude: f64) -> f64 {
+    64.0 * f64::EPSILON * magnitude.max(1.0)
+}
+
+/// (actual, expected, cells summed, Σ |values|), or why the check cannot be
+/// evaluated.
+fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64, usize, f64), String> {
     let t = &check.target;
     let actual = match read(doc, t.table, t.row, t.col)? {
         Read::Number(v) => v,
@@ -453,6 +461,7 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
         return Err("the check has no terms".to_owned());
     }
     let mut expected = 0.0;
+    let mut magnitude = actual.abs();
     let mut cells = 0;
     for term in &check.terms {
         let scale = scale(units, term.table, t.table)?;
@@ -468,11 +477,12 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
                 cells += 1;
                 if let Read::Number(v) = read(doc, term.table, cell.row, cell.col)? {
                     expected += f64::from(term.sign) * v * scale;
+                    magnitude += (v * scale).abs();
                 }
             }
         }
     }
-    Ok((actual, expected, cells))
+    Ok((actual, expected, cells, magnitude))
 }
 
 enum Read {

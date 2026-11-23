@@ -1936,3 +1936,33 @@ fn foot_writes_a_workbook_with_a_formula_per_check() {
     dsd(["foot", &s(&src), "-o", "-"]).fails("invalid_argument");
     dsd(["foot", &s(&src), "-o", &s(&src), "--force"]).fails("output_exists");
 }
+
+#[test]
+fn foot_reports_a_small_difference_in_large_amounts_and_survives_any_table_number() {
+    let w = Work::new("foot-large");
+    let note = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH></TR></THEAD><TBODY>\
+<TR><TD>갑</TD><TD>1,000,000,000,000</TD></TR>\
+<TR><TD>을</TD><TD>500</TD></TR>\
+<TR><TD>합 계</TD><TD>1,000,000,000,000</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    let src = w.variant("large.dsd", &xml);
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        format!(
+            r#"{{"checks": [{{"id": "a:total", "kind": "vertical", "origin": "agent",
+                "target": {{"table": 5, "row": 4, "col": 2, "rowLabel": "합 계"}},
+                "terms": [{{"sign": 1, "table": 5, "rows": [2, 3], "col": 2}}], "note": "합계 sums its rows"}}],
+               "dismiss": [{{"id": "x", "target": {{"table": {}, "row": 1, "col": 1, "rowLabel": "합 계"}}, "reason": "r"}}]}}"#,
+            usize::MAX
+        ),
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let total = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == "a:total").unwrap();
+    assert_eq!((total["status"].as_str(), total["difference"].as_f64()), (Some("fail"), Some(-500.0)));
+    assert_eq!(r["stale"][0]["id"], "x", "a table number past the document is stale, not a crash");
+}

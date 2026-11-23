@@ -285,7 +285,9 @@ fn place(doc: &Doc, ctx: &Context, keys: &mut Keys, stated: &CellRef) -> Place {
         Some(s) => {
             (1..=doc.tables.len()).filter(|&tt| ctx.section(tt).is_some_and(|x| same(Some(s), Some(x)))).collect()
         }
-        None => (t.saturating_sub(NEARBY_TABLES).max(1)..=(t + NEARBY_TABLES).min(doc.tables.len())).collect(),
+        None => {
+            (t.saturating_sub(NEARBY_TABLES).max(1)..=t.saturating_add(NEARBY_TABLES).min(doc.tables.len())).collect()
+        }
     };
     let (row_key, col_key) = (stated.row_label.as_deref().map(label_key), stated.col_label.as_deref().map(label_key));
     let mut found: Vec<(usize, usize, usize)> = Vec::new();

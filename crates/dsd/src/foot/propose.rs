@@ -383,7 +383,7 @@ impl<'a> Grid<'a> {
         }
         if let Some((_, i)) = best {
             let (rule, kind, cand, _) = &cands[i];
-            for g in self.applicable(t, cand) {
+            for g in self.emitted(t, cand) {
                 out.checks.push(self.vertical_check(g, t, (*rule, *kind, "v"), cand));
             }
             return;
@@ -396,7 +396,7 @@ impl<'a> Grid<'a> {
             .filter(|(_, _, cand, strict)| !strict && !self.applicable(t, cand).is_empty())
             .min_by(|a, b| self.miss(t, &a.2).total_cmp(&self.miss(t, &b.2)));
         if let Some((rule, kind, cand, _)) = closest {
-            for g in self.applicable(t, cand) {
+            for g in self.emitted(t, cand) {
                 out.unresolved.push(self.vertical_check(g, t, (*rule, *kind, "v"), cand));
             }
         }
@@ -411,6 +411,20 @@ impl<'a> Grid<'a> {
             .filter(|g| {
                 let Some((c, V::Num(_))) = self.in_group(g, t) else { return false };
                 self.sum(g, cand).is_some_and(|s| !self.dash[t - 1][c - 1] || equal(s, 0.0))
+            })
+            .collect()
+    }
+
+    /// The period groups a chosen structure is stated for: those where it
+    /// applies, and those where a part holds text, which evaluation then
+    /// reports as needing judgment instead of the period disappearing.
+    fn emitted(&self, t: usize, cand: &Cand) -> Vec<&Vec<usize>> {
+        self.groups
+            .iter()
+            .filter(|g| {
+                let Some((c, V::Num(_))) = self.in_group(g, t) else { return false };
+                let dash = self.dash[t - 1][c - 1];
+                self.sum(g, cand).map_or(!dash, |s| !dash || equal(s, 0.0))
             })
             .collect()
     }
@@ -708,7 +722,7 @@ impl<'a> Grid<'a> {
             rows.iter().map(|&r| self.label[r - 1].as_deref().map_or_else(String::new, key)).collect();
         if let Some((a, terms)) = relation(&row_keys) {
             let cand: Cand = terms.iter().map(|&i| (1, rows[i])).collect();
-            for g in self.applicable(rows[a], &cand) {
+            for g in self.emitted(rows[a], &cand) {
                 out.checks.push(self.vertical_check(g, rows[a], (Rule::Identity, Kind::Identity, "i"), &cand));
             }
         }
@@ -722,7 +736,7 @@ impl<'a> Grid<'a> {
             .collect();
         let Some((a, terms)) = relation(&col_keys) else { return Vec::new() };
         let cand: Cand = terms.iter().map(|&i| (1, cols[i])).collect();
-        for r in self.applicable_rows(cols[a], &cand) {
+        for r in self.emitted_rows(cols[a], &cand) {
             out.checks.push(self.row_check((Rule::Identity, Kind::Identity, "i"), &cand, r, cols[a]));
         }
         let mut explained = vec![cols[a]];
@@ -870,6 +884,17 @@ impl<'a> Grid<'a> {
             .collect()
     }
 
+    /// The rows a chosen structure is stated for (as [`Grid::emitted`] for columns).
+    fn emitted_rows(&self, target: usize, cand: &Cand) -> Vec<usize> {
+        self.data_rows()
+            .filter(|&r| {
+                let dash = self.dash[r - 1][target - 1];
+                matches!(self.at(r, target), V::Num(_))
+                    && self.row_sum(r, cand).map_or(!dash, |s| !dash || equal(s, 0.0))
+            })
+            .collect()
+    }
+
     fn row_miss(&self, target: usize, cand: &Cand) -> f64 {
         self.applicable_rows(target, cand)
             .iter()
@@ -916,7 +941,7 @@ impl<'a> Grid<'a> {
         let emit = |rule: Rule, kind: Kind, cand: &Cand, r: usize| self.row_check((rule, kind, "h"), cand, r, target);
         if let Some((_, i)) = best {
             let (rule, kind, cand, _) = &cands[i];
-            out.checks.extend(self.applicable_rows(target, cand).into_iter().map(|r| emit(*rule, *kind, cand, r)));
+            out.checks.extend(self.emitted_rows(target, cand).into_iter().map(|r| emit(*rule, *kind, cand, r)));
             return;
         }
         if !needed {
@@ -927,7 +952,7 @@ impl<'a> Grid<'a> {
             .filter(|(_, _, cand, strict)| !strict && !self.applicable_rows(target, cand).is_empty())
             .min_by(|a, b| self.row_miss(target, &a.2).total_cmp(&self.row_miss(target, &b.2)));
         if let Some((rule, kind, cand, _)) = closest {
-            out.unresolved.extend(self.applicable_rows(target, cand).into_iter().map(|r| emit(*rule, *kind, cand, r)));
+            out.unresolved.extend(self.emitted_rows(target, cand).into_iter().map(|r| emit(*rule, *kind, cand, r)));
         }
     }
 }
@@ -1002,7 +1027,7 @@ fn next_day((y, m, d): (u32, u32, u32)) -> (u32, u32, u32) {
 }
 
 fn equal(a: f64, e: f64) -> bool {
-    (a - e).abs() <= 1e-9 * a.abs().max(e.abs()).max(1.0)
+    (a - e).abs() <= super::rounding_slack(a.abs().max(e.abs()))
 }
 
 /// `당기 / 합계` → `당기`; a label without parts is its own first part.
@@ -1378,8 +1403,36 @@ mod tests {
             &[&["갑", "100", "80"], &["을", "200", "120"], &["병", "50"], &["합 계", "350", "200"]],
         ));
         let r = foot(&d);
-        assert_eq!(lines(&r), ["v:T1.R5.C2 LabelTotal Pass +R2-4C2-2"]);
-        assert!(r.checks.iter().all(|c| c.status != Status::NeedsJudgment));
+        // The prior period is stated too, and needs judgment rather than vanishing.
+        assert_eq!(
+            lines(&r),
+            ["v:T1.R5.C2 LabelTotal Pass +R2-4C2-2", "v:T1.R5.C3 LabelTotal NeedsJudgment +R2-4C3-3"]
+        );
+        assert_eq!(r.checks[1].reason.as_deref(), Some("T1 R4C3 is not covered by any cell"));
+    }
+
+    #[test]
+    fn a_period_with_text_in_its_parts_needs_judgment_instead_of_vanishing() {
+        let d = doc(&table(
+            &["구 분", "당기", "전기"],
+            &[&["갑", "100", "80"], &["을", "200", "주석 5"], &["합 계", "300", "200"]],
+        ));
+        let r = foot(&d);
+        let shown: Vec<(String, Status)> = r.checks.iter().map(|c| (c.id.clone(), c.status)).collect();
+        assert_eq!(shown, [("v:T1.R4.C2".to_owned(), Status::Pass), ("v:T1.R4.C3".to_owned(), Status::NeedsJudgment)]);
+    }
+
+    #[test]
+    fn a_one_unit_difference_in_large_amounts_fails() {
+        // At 10^12 a relative slack of 10^-9 would have absorbed 500.
+        let d = doc(&table(
+            &["구 분", "당기"],
+            &[&["갑", "1,000,000,000,000"], &["을", "500"], &["병", "1,000"], &["합 계", "1,000,000,001,499"]],
+        ));
+        let r = foot(&d);
+        let all: Vec<(Status, Option<f64>)> =
+            r.checks.iter().chain(&r.unresolved).map(|c| (c.status, c.difference)).collect();
+        assert_eq!(all, [(Status::Fail, Some(-1.0))]);
     }
 
     #[test]

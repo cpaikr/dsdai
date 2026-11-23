@@ -404,6 +404,12 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
     foot_smoke(label, src, sheets, names, tmp)
 
 
+def rounding_slack(magnitude: float) -> float:
+    """The CLI's allowance for binary rounding of values adding up to
+    `magnitude` in absolute terms (`foot::rounding_slack`)."""
+    return 64 * sys.float_info.epsilon * max(1.0, magnitude)
+
+
 def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> None:
     """Re-evaluate every proposed check from the exported workbook's cells,
     independently of the CLI's arithmetic: same-table terms summed from the
@@ -429,13 +435,16 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
         target = check["target"]
         cross = any(term["table"] != target["table"] for term in check["terms"])
         actual, expected, text = value(target["table"], target["row"], target["col"]), 0.0, False
+        magnitude = abs(actual) if isinstance(actual, float) else 0.0
         for term in check["terms"]:
             rows, cols = term.get("rows", [term.get("row")] * 2), term.get("cols", [term.get("col")] * 2)
             for row in range(rows[0], rows[1] + 1):
                 for col in range(cols[0], cols[1] + 1):
                     got = value(term["table"], row, col)
                     text |= got == "text"
-                    expected += term["sign"] * got if isinstance(got, float) else 0.0
+                    if isinstance(got, float):
+                        expected += term["sign"] * got
+                        magnitude += abs(got)
         if check["status"] == "needsJudgment":
             # Cross-table checks also need judgment when a unit is unknown.
             ok = text or not isinstance(actual, float) or cross
@@ -445,22 +454,22 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
             ratio = check["expected"] / expected if expected else 1.0
             power = round(math.log10(abs(ratio))) if ratio else 0
             scaled = expected * 10.0**power
-            scale = max(1.0, abs(scaled), abs(actual or 0.0))
+            slack = rounding_slack(abs(actual or 0.0) + (magnitude - abs(actual or 0.0)) * 10.0**power)
             ok = (
                 not text
                 and isinstance(actual, float)
-                and abs(check["actual"] - actual) <= 1e-9 * scale
-                and abs(check["expected"] - scaled) <= 1e-9 * scale
-                and (check["status"] == "pass") == (abs(actual - scaled) <= check["allowed"] + 1e-9 * scale)
+                and abs(check["actual"] - actual) <= slack
+                and abs(check["expected"] - scaled) <= slack
+                and (check["status"] == "pass") == (abs(actual - scaled) <= check["allowed"] + slack)
             )
         else:
-            scale = max(1.0, abs(expected), abs(actual or 0.0))
-            holds = isinstance(actual, float) and abs(actual - expected) <= check["allowed"] + 1e-9 * scale
+            slack = rounding_slack(magnitude)
+            holds = isinstance(actual, float) and abs(actual - expected) <= check["allowed"] + slack
             ok = (
                 not text
                 and isinstance(actual, float)
-                and abs(check["actual"] - actual) <= 1e-9 * scale
-                and abs(check["expected"] - expected) <= 1e-9 * scale
+                and abs(check["actual"] - actual) <= slack
+                and abs(check["expected"] - expected) <= slack
                 and (check["status"] == "pass") == holds
             )
         disagreements += not ok
