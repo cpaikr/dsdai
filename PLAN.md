@@ -568,9 +568,9 @@ Recorded during implementation:
 - **Footing workbook (2.5).** `dsd foot FILE [--checks C] -o OUT [--force]`
   writes the `dsd xlsx` workbook plus checks, following the reference
   workbook's convention. Each check is a difference formula,
-  `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),6)` (the factor converts units;
-  rounding to 6 places keeps binary noise in decimal sums from showing as a
-  difference), formatted `General;-General;"✓"` (0 shows ✓) and red outside
+  `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),k)` (the factor converts units;
+  rounding to the places the evaluator's slack allows keeps binary noise in
+  decimal sums from showing as a difference), formatted `General;-General;"✓"` (0 shows ✓) and red outside
   its allowance by conditional format. Every position is read through the
   cell that owns it, as the CLI reads it: a target inside a span refers to
   the merge's first cell, and a term range a span enters from outside lists
@@ -608,6 +608,30 @@ Recorded during implementation:
   Movement schedules: wherever the reference workbook reports a
   difference (its formulas leave out the opening column), the matching
   checks here pass.
+- **Review fixes (PR #20).**
+  - **Rounding slack:** 64 ulps of the sum of the values' magnitudes,
+    replacing a relative 10⁻⁹, which hid a 500 difference at 10¹².
+  - **Units:** a unit that is not money compares only with itself, and only
+    when it is a known one (주, 천주, 명, 개, 건, 회, EA, USD, 천USD, EUR, JPY,
+    CNY).
+  - **Missing structure:** a period whose parts hold text is stated, and
+    evaluates to `needsJudgment`. A labelled total that no candidate can be
+    read for is `uncovered`.
+  - **Spans:** covered positions are not terms.
+  - **Unlabelled columns:** the majority is counted over rows whose total
+    is not 0.
+  - **Statement ↔ note:** a note column headed with the other period never
+    matches. One note cell cannot confirm both periods; those stay
+    candidates.
+  - **Prior closings:** pairs stay within one section and pass over a prior
+    interim table.
+  - **Re-application:** a Roman numeral is a marker only before `.`, `)`,
+    or a space. An entry naming a section needs the document to name the
+    same one.
+  - **Workbook rounding:** a difference formula rounds to the places the
+    evaluator's slack allows, not a fixed 6.
+  - **check.py:** unit factors are taken from the captions the workbook
+    shows, not from the CLI's reported expected value.
 - **Column labels (2.3).** A unit caption heading the whole table is not
   part of a column label (it had made every label start `(단위: 원) /`).
 - **Corpus (2.3).** Each proposer is measured on every private sample for

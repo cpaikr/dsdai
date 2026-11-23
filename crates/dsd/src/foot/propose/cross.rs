@@ -150,10 +150,10 @@ pub(super) fn statement_notes(doc: &Doc, out: &mut Proposals) {
             if refs.is_empty() {
                 continue;
             }
-            let wanted: Vec<(usize, usize, f64)> = [cur, prior]
+            let wanted: Vec<(Period, usize, f64)> = [(Period::Current, cur), (Period::Prior, prior)]
                 .into_iter()
-                .filter_map(|g| match grid.in_group(&grid.groups[g], r) {
-                    Some((c, V::Num(x))) if x != 0.0 => Some((g, c, x)),
+                .filter_map(|(p, g)| match grid.in_group(&grid.groups[g], r) {
+                    Some((c, V::Num(x))) if x != 0.0 => Some((p, c, x)),
                     _ => None,
                 })
                 .collect();
@@ -174,7 +174,12 @@ pub(super) fn statement_notes(doc: &Doc, out: &mut Proposals) {
                     let score = if !line.is_empty() && label == line { 2 } else { u8::from(g.rank(rr).is_some()) };
                     for &c in &g.figure_cols {
                         let V::Num(x) = g.at(rr, c) else { continue };
-                        for (i, &(_, _, amount)) in wanted.iter().enumerate() {
+                        // A note column headed with the other period never holds this one's amount.
+                        let column = col_label(g.doc, g.table, c).as_deref().and_then(period);
+                        for (i, &(p, _, amount)) in wanted.iter().enumerate() {
+                            if column.is_some_and(|q| q != p) {
+                                continue;
+                            }
                             if x != 0.0 && equal(x * f, amount) {
                                 hits[i].push(Hit { table: t, row: rr, col: c, score });
                             }
@@ -197,8 +202,15 @@ pub(super) fn statement_notes(doc: &Doc, out: &mut Proposals) {
                     .filter(|(a, b)| a.table == b.table && a.row == b.row && a.col != b.col)
                     .max_by_key(|(a, b)| (a.score.max(b.score), std::cmp::Reverse((a.table, a.row))));
                 let (a, b) = side_by_side.unwrap_or_else(|| (best(&hits[0]).unwrap(), best(&hits[1]).unwrap()));
-                out.checks.push(emit(&a, 0));
-                out.checks.push(emit(&b, 1));
+                let cell = |h: &Hit| (h.table, h.row, h.col);
+                if cell(&a) == cell(&b) {
+                    // One note cell cannot confirm both periods (equal amounts).
+                    out.candidates.push(emit(&a, 0));
+                    out.candidates.push(emit(&b, 1));
+                } else {
+                    out.checks.push(emit(&a, 0));
+                    out.checks.push(emit(&b, 1));
+                }
             } else if hits.iter().any(|h| !h.is_empty()) {
                 for (i, hs) in hits.iter().enumerate() {
                     if let Some(h) = best(hs) {
@@ -228,6 +240,9 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
         within(g, out);
     }
     let periods = table_periods(doc);
+    // A pair stays within one section (note or statement), so neighbouring
+    // schedules of other notes are never compared.
+    let sections = crate::foot::table_sections(doc);
     let mut paired = vec![false; grids.len()];
     for (i, a) in grids.iter().enumerate() {
         let Some(a) = a else { continue };
@@ -235,21 +250,25 @@ pub(super) fn prior_closings(doc: &Doc, out: &mut Proposals) {
             continue;
         }
         let Some((pa, interim_a)) = periods[i] else { continue };
-        // The other period's table: the nearest one after it naming the other
-        // period with the same columns (당기 취득원가 with 전기 취득원가, even
-        // when 당기 감가상각누계액 sits between them).
+        // A prior interim period's closing is not the next opening.
+        if pa == Period::Prior && interim_a {
+            continue;
+        }
+        // The other period's table: the nearest one after it in its section,
+        // naming the other period (a year end, when it is the prior one) with
+        // the same columns (당기 취득원가 with 전기 취득원가, even when 당기
+        // 감가상각누계액 sits between them).
         let partner = (i + 1..grids.len().min(i + 7)).find(|&j| {
             !paired[j]
-                && periods[j].is_some_and(|(p, _)| p != pa)
+                && sections[i].is_some()
+                && sections[j] == sections[i]
+                && periods[j].is_some_and(|(p, interim)| p != pa && !(p == Period::Prior && interim))
                 && grids[j].as_ref().is_some_and(|b| shape(b) == shape(a))
         });
         let Some(j) = partner else { continue };
-        let (Some(b), Some((_, interim_b))) = (&grids[j], periods[j]) else { continue };
+        let Some(b) = &grids[j] else { continue };
         paired[j] = true;
-        let (current, prior, prior_interim) = if pa == Period::Current { (a, b, interim_b) } else { (b, a, interim_a) };
-        if prior_interim {
-            continue;
-        }
+        let (current, prior) = if pa == Period::Current { (a, b) } else { (b, a) };
         across_columns(current, prior, out);
         across_rows(current, prior, out);
     }
@@ -483,6 +502,53 @@ mod tests {
             cross(&foot(&d)),
             [("x:T2.R2.C3/T3".to_owned(), Status::Pass), ("x:T2.R2.C4/T3".to_owned(), Status::Pass)]
         );
+    }
+
+    /// A statement naming note 4, and note 4's table with `header` and one row.
+    fn statement_and_note(statement: (&str, &str), header: (&str, &str), note: (&str, &str)) -> Doc {
+        doc(&format!(
+            "<SECTION-1><TITLE>재 무 제 표</TITLE><TABLE><COLGROUP><COL/></COLGROUP><TBODY><TR><TD>재 무 상 태 표</TD></TR></TBODY></TABLE><P>(단위: 원)</P>{}</SECTION-1>\
+             <SECTION-1><TITLE>주 석</TITLE><P>4. 현금</P><P>(단위: 원)</P>{}</SECTION-1>",
+            table(&["과 목", "주 석", "당 기", "전 기"], &[&["현금", "4", statement.0, statement.1]]),
+            table(&["구 분", header.0, header.1], &[&["현금", note.0, note.1]]),
+        ))
+    }
+
+    #[test]
+    fn a_note_amount_matches_only_its_own_period() {
+        // The note swaps the amounts under its period headings.
+        let r = foot(&statement_and_note(("100", "80"), ("당기말", "전기말"), ("80", "100")));
+        assert!(cross(&r).is_empty() && r.candidates.is_empty());
+        assert_eq!(r.uncovered.len(), 2);
+    }
+
+    #[test]
+    fn one_note_cell_cannot_confirm_both_periods() {
+        let r = foot(&statement_and_note(("100", "100"), ("구분A", "구분B"), ("100", "-")));
+        assert!(cross(&r).is_empty());
+        assert_eq!(r.candidates.len(), 2, "equal amounts found in one cell stay candidates");
+    }
+
+    #[test]
+    fn prior_closings_pair_only_within_a_section_and_skip_interim_partners() {
+        let movement = |rows: &[&[&str]]| table(&["구 분", "기초", "취득", "기말"], rows);
+        // Note 5's current table and note 6's prior table share a shape: not a pair.
+        let d = doc(&format!(
+            "<SECTION-1><TITLE>주 석</TITLE><P>5. 유형자산</P><P>(1) 당기</P><P>(단위: 원)</P>{}\
+             <P>6. 투자부동산</P><P>(1) 전기</P><P>(단위: 원)</P>{}</SECTION-1>",
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "90", "5", "95"]]),
+        ));
+        assert!(cross(&foot(&d)).iter().all(|(id, _)| !id.starts_with("x:T1.")), "{:?}", cross(&foot(&d)));
+        // A prior interim table between the current table and its year-end partner is passed over.
+        let d = doc(&format!(
+            "<P>(1) 당기</P><P>(단위: 원)</P>{}<P>(2) 전반기</P><P>(단위: 원)</P>{}<P>(3) 전기</P><P>(단위: 원)</P>{}",
+            movement(&[&["토지", "100", "10", "110"]]),
+            movement(&[&["토지", "90", "5", "95"]]),
+            movement(&[&["토지", "90", "10", "100"]]),
+        ));
+        let paired: Vec<(String, Status)> = cross(&foot(&d)).into_iter().filter(|(id, _)| !id.contains('/')).collect();
+        assert_eq!(paired, [("x:T1.R2.C2".to_owned(), Status::Pass)]);
     }
 
     #[test]

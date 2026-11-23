@@ -240,6 +240,10 @@ pub struct CheckResult {
     pub allowed: f64,
     /// Cells summed by the terms (a spanning cell counts once).
     pub cells: usize,
+    /// Σ |values| of the target and every summed cell, which bounds their
+    /// binary rounding; for rendering, not the result.
+    #[serde(skip)]
+    pub magnitude: f64,
     /// The target table's unit caption, when found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit: Option<String>,
@@ -416,6 +420,7 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
         difference: None,
         allowed: 0.0,
         cells: 0,
+        magnitude: 0.0,
         unit: units.get(t.table.wrapping_sub(1)).cloned().flatten().map(|u| u.text),
         reason: None,
         note: check.note.clone(),
@@ -435,6 +440,7 @@ fn evaluate_one(doc: &Doc, ctx: &Context, check: &Check) -> CheckResult {
             result.difference = Some(difference);
             result.allowed = allowed;
             result.cells = cells;
+            result.magnitude = magnitude;
         }
         Err(reason) => result.reason = Some(reason),
     }
@@ -459,6 +465,13 @@ fn compute(doc: &Doc, units: &[Option<Unit>], check: &Check) -> Result<(f64, f64
     };
     if check.terms.is_empty() {
         return Err("the check has no terms".to_owned());
+    }
+    // The JSON form rejects these; a check built through the API is held to the same rules.
+    for term in &check.terms {
+        let ordered = |(a, b): (usize, usize)| a >= 1 && a <= b;
+        if !matches!(term.sign, 1 | -1) || term.table == 0 || !ordered(term.rows) || !ordered(term.cols) {
+            return Err(format!("a term needs a sign of 1 or -1 and rows and columns from 1 upward, got {term:?}"));
+        }
     }
     let mut expected = 0.0;
     let mut magnitude = actual.abs();
@@ -511,8 +524,10 @@ pub(crate) fn scale(units: &[Option<Unit>], from: usize, to: usize) -> Result<f6
     }
     let unit = |t: usize| units.get(t.wrapping_sub(1)).cloned().flatten();
     match (unit(from), unit(to)) {
-        (Some(a), Some(b)) if a.text == b.text => Ok(1.0),
         (Some(Unit { factor: Some(fa), .. }), Some(Unit { factor: Some(fb), .. })) => Ok(fa / fb),
+        // A unit that is not money compares only with itself, and only when
+        // it is one the tool knows (a caption it cannot read is not one).
+        (Some(a), Some(b)) if a.text == b.text && PLAIN_UNITS.contains(&a.text.as_str()) => Ok(1.0),
         (a, b) => Err(format!(
             "T{from} ({}) and T{to} ({}) cannot be compared without a known unit for each",
             a.map_or_else(|| "unit not found".to_owned(), |u| u.text),
@@ -523,6 +538,10 @@ pub(crate) fn scale(units: &[Option<Unit>], from: usize, to: usize) -> Result<f6
 
 // ---------------------------------------------------------------------------
 // units
+
+/// Units that are not money but compare with themselves: counts of shares,
+/// people, and items, and foreign currencies.
+const PLAIN_UNITS: [&str; 12] = ["주", "천주", "명", "개", "건", "회", "EA", "USD", "천USD", "EUR", "JPY", "CNY"];
 
 /// A table's unit as its caption states it (`천원`), and its size in won
 /// when it is a currency unit.
@@ -744,6 +763,30 @@ mod tests {
         );
         let r = &evaluate(&d, &[check("span", (1, 3, 2), vec![term(1, 1, (1, 2), 2)])]).checks[0];
         assert_eq!((r.status, r.cells), (Status::Pass, 1));
+    }
+
+    #[test]
+    fn a_term_built_through_the_api_obeys_the_json_rules() {
+        let d = doc(&table(&["과 목", "당기"], &[&["가", "0"], &["계", "0"]]));
+        let mut c = check("c", (1, 3, 2), vec![term(1, 1, (3, 2), 2)]);
+        let r = &evaluate(&d, &[c.clone()]).checks[0];
+        assert_eq!(r.status, Status::NeedsJudgment, "an empty row range sums nothing");
+        c.terms = vec![term(2, 1, (2, 2), 2)];
+        assert_eq!(evaluate(&d, &[c]).checks[0].status, Status::NeedsJudgment);
+    }
+
+    #[test]
+    fn captions_naming_an_unknown_unit_do_not_compare() {
+        let d = doc(&format!(
+            "<P>(단위: 미상)</P>{}<P>(단위: 미상)</P>{}<P>(단위: 주)</P>{}<P>(단위: 주)</P>{}",
+            table(&["구 분", "당기"], &[&["가", "10"]]),
+            table(&["구 분", "당기"], &[&["가", "10"]]),
+            table(&["구 분", "당기"], &[&["가", "10"]]),
+            table(&["구 분", "당기"], &[&["가", "10"]]),
+        ));
+        let cross = |id: &str, target: usize, from: usize| check(id, (target, 2, 2), vec![term(1, from, (2, 2), 2)]);
+        let f = evaluate(&d, &[cross("unknown", 2, 1), cross("shares", 4, 3)]);
+        assert_eq!((f.checks[0].status, f.checks[1].status), (Status::NeedsJudgment, Status::Pass));
     }
 
     #[test]

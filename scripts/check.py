@@ -404,6 +404,53 @@ def xlsx_smoke(label: str, src: Path, tmp: Path) -> None:
     foot_smoke(label, src, sheets, names, tmp)
 
 
+CURRENCY = {"원": 1.0, "천원": 1e3, "백만원": 1e6, "억원": 1e8, "십억원": 1e9}
+# Units that are not money but compare with themselves (`foot::PLAIN_UNITS`).
+PLAIN_UNITS = {"주", "천주", "명", "개", "건", "회", "EA", "USD", "천USD", "EUR", "JPY", "CNY"}
+UNIT_CAPTION = re.compile(r"단위[:：]([^)）,，;\]]+)")
+
+
+def caption_unit(texts) -> str | None:
+    for text in texts:
+        m = UNIT_CAPTION.search(re.sub(r"\s", "", text))
+        if m:
+            return m.group(1)
+    return None
+
+
+def workbook_units(sheets: dict, names: dict) -> dict:
+    """Each table's unit as the workbook shows it, read independently of the
+    CLI: a caption in the table itself, else in the nearest row above it (a
+    caption line, or the caption of the table that row belongs to)."""
+    tables = {}
+    for name, (sheet, first, last) in names.items():
+        if name.startswith("DSD_T"):
+            tables[int(name[5:])] = (sheet, first, last)
+
+    def own(t):
+        sheet, (top, left), (bottom, right) = tables[t]
+        cells = sheets[sheet]
+        return caption_unit(
+            v[1] for (r, c), v in sorted(cells.items()) if top <= r <= bottom and left <= c <= right and v[0] == "s"
+        )
+
+    units = {}
+    for t, (sheet, (top, _left), _last) in tables.items():
+        unit = own(t)
+        if unit is None:
+            cells = sheets[sheet]
+            above = [r for (r, _c), v in cells.items() if 3 <= r < top and v != ("s", "")]
+            if above:
+                row = max(above)
+                holder = next((u for u, (s, f, l) in tables.items() if s == sheet and f[0] <= row <= l[0]), None)
+                if holder is not None:
+                    unit = own(holder)
+                else:
+                    unit = caption_unit(v[1] for (r, _c), v in cells.items() if r == row and v[0] == "s")
+        units[t] = unit
+    return units
+
+
 def rounding_slack(magnitude: float) -> float:
     """The CLI's allowance for binary rounding of values adding up to
     `magnitude` in absolute terms (`foot::rounding_slack`)."""
@@ -429,44 +476,48 @@ def foot_smoke(label: str, src: Path, sheets: dict, names: dict, tmp: Path) -> N
             return None
         return got[1] if got[0] == "n" else "text"
 
+    units = workbook_units(sheets, names)
+
+    def ratio(source: int, target: int):
+        """The factor converting table `source` into `target`'s unit, from
+        the captions the workbook shows; None when they cannot be compared."""
+        if source == target:
+            return 1.0
+        a, b = units.get(source), units.get(target)
+        if a and b and a in CURRENCY and b in CURRENCY:
+            return CURRENCY[a] / CURRENCY[b]
+        if a and a == b and a in PLAIN_UNITS:
+            return 1.0
+        return None
+
     disagreements = 0
     checks = result["checks"] + result["unresolved"] + result["candidates"]
     for check in checks:
         target = check["target"]
-        cross = any(term["table"] != target["table"] for term in check["terms"])
+        factors = [ratio(term["table"], target["table"]) for term in check["terms"]]
+        comparable = all(f is not None for f in factors)
         actual, expected, text = value(target["table"], target["row"], target["col"]), 0.0, False
         magnitude = abs(actual) if isinstance(actual, float) else 0.0
-        for term in check["terms"]:
+        for term, factor in zip(check["terms"], factors):
+            factor = factor or 1.0
             rows, cols = term.get("rows", [term.get("row")] * 2), term.get("cols", [term.get("col")] * 2)
             for row in range(rows[0], rows[1] + 1):
                 for col in range(cols[0], cols[1] + 1):
                     got = value(term["table"], row, col)
                     text |= got == "text"
                     if isinstance(got, float):
-                        expected += term["sign"] * got
-                        magnitude += abs(got)
+                        expected += term["sign"] * got * factor
+                        magnitude += abs(got * factor)
         if check["status"] == "needsJudgment":
-            # Cross-table checks also need judgment when a unit is unknown.
-            ok = text or not isinstance(actual, float) or cross
-        elif cross:
-            # Units convert between tables: the CLI's sum is the workbook's
-            # times a power of ten, the ratio of two currency units.
-            ratio = check["expected"] / expected if expected else 1.0
-            power = round(math.log10(abs(ratio))) if ratio else 0
-            scaled = expected * 10.0**power
-            slack = rounding_slack(abs(actual or 0.0) + (magnitude - abs(actual or 0.0)) * 10.0**power)
-            ok = (
-                not text
-                and isinstance(actual, float)
-                and abs(check["actual"] - actual) <= slack
-                and abs(check["expected"] - scaled) <= slack
-                and (check["status"] == "pass") == (abs(actual - scaled) <= check["allowed"] + slack)
-            )
+            ok = text or not isinstance(actual, float) or not comparable
         else:
+            # Units come from the captions the workbook shows, not from the
+            # CLI's expected value.
             slack = rounding_slack(magnitude)
             holds = isinstance(actual, float) and abs(actual - expected) <= check["allowed"] + slack
             ok = (
-                not text
+                comparable
+                and not text
                 and isinstance(actual, float)
                 and abs(check["actual"] - actual) <= slack
                 and abs(check["expected"] - expected) <= slack
@@ -516,12 +567,12 @@ def read_formulas(path: Path) -> dict:
 
 
 REFERENCE = re.compile(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]+\$?\d+)(?::(\$?[A-Z]+\$?\d+))?")
-DIFFERENCE = re.compile(r"^ROUND\((?P<target>(?:'(?:[^']|'')+'!)?\$?[A-Z]+\$?\d+)-\((?P<terms>.*)\),6\)$")
+DIFFERENCE = re.compile(r"^ROUND\((?P<target>(?:'(?:[^']|'')+'!)?\$?[A-Z]+\$?\d+)-\((?P<terms>.*)\),-?\d+\)$")
 TERM = re.compile(r"(?P<sign>[+-]?)(?:(?P<factor>[0-9.e+-]+)\*)?SUM\((?P<refs>[^)]+)\)")
 
 
 def evaluate_difference(formula: str, home: str, sheets: dict, formulas: dict):
-    """Evaluate `ROUND(target-(±[k*]SUM(refs)...),6)` or a reference to such a
+    """Evaluate `ROUND(target-(±[k*]SUM(refs)...),places)` or a reference to such a
     cell, independently of the CLI, from the workbook's cell values. Returns
     None for a formula of another shape."""
 

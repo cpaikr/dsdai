@@ -142,7 +142,8 @@ with its terms and status (pass, fail, or needsJudgment with a reason). A
 check passes only when its difference is 0.
 Values are read as `dsd xlsx` types them; a blank or a lone - is 0. Note
 reference columns (주석) are never summed. Tables in different units convert
-when both captions name a currency unit (원, 천원, 백만원, 억원, 십억원).
+when both captions name a currency unit (원, 천원, 백만원, 억원, 십억원); other
+units (주, 명, USD, ...) compare only with the same unit.
 
 result.unresolved lists labelled totals no structure explains, each with its
 closest candidate evaluated: a request for judgment, not an error.

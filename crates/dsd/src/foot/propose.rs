@@ -399,6 +399,13 @@ impl<'a> Grid<'a> {
             for g in self.emitted(t, cand) {
                 out.unresolved.push(self.vertical_check(g, t, (*rule, *kind, "v"), cand));
             }
+            return;
+        }
+        // No candidate can even be read here: the total has nothing to sum.
+        for g in &self.groups {
+            if let Some((c, V::Num(_))) = self.in_group(g, t) {
+                out.uncovered.push((Kind::Vertical, self.table.index, t, c));
+            }
         }
     }
 
@@ -561,9 +568,12 @@ impl<'a> Grid<'a> {
         let lines: Vec<usize> =
             (self.first_data..t).filter(|&r| self.participates(r) && self.rank(r).is_none()).collect();
         cands.push(plus(top_level(self, lines)));
-        // Totals of the same rank just above (부채총계 + 자본총계).
-        let same: Vec<usize> =
-            (self.first_data..t).rev().filter(|&r| self.participates(r) && self.rank(r) == Some(rank)).collect();
+        // Totals of the same rank just above (부채총계 + 자본총계), a few at most.
+        let same: Vec<usize> = (self.first_data..t)
+            .rev()
+            .filter(|&r| self.participates(r) && self.rank(r) == Some(rank))
+            .take(MAX_CHAIN)
+            .collect();
         for n in 2..=same.len() {
             let mut rows = same[..n].to_vec();
             rows.reverse();
@@ -645,7 +655,13 @@ impl<'a> Grid<'a> {
 
     fn vertical_check(&self, g: &[usize], t: usize, (rule, kind, axis): (Rule, Kind, &str), cand: &Cand) -> Check {
         let col = self.in_group(g, t).map_or(g[0], |(c, _)| c);
-        let mut rows: Vec<(i8, usize, usize)> = cand.iter().map(|&(s, r)| (s, r, self.col_of(g, r))).collect();
+        // A position a span covers contributed nothing to the sum (its figure is
+        // at the span's origin), so it is not a term either.
+        let mut rows: Vec<(i8, usize, usize)> = cand
+            .iter()
+            .map(|&(s, r)| (s, r, self.col_of(g, r)))
+            .filter(|&(_, r, c)| self.at(r, c) != V::Covered)
+            .collect();
         rows.sort_by_key(|&(_, r, _)| r);
         let mut terms: Vec<Term> = Vec::new();
         for (sign, r, c) in rows {
@@ -834,7 +850,8 @@ impl<'a> Grid<'a> {
 
     /// A check across row `r`: column `target` = the signed columns in `cand`.
     fn row_check(&self, (rule, kind, axis): (Rule, Kind, &str), cand: &Cand, r: usize, target: usize) -> Check {
-        let mut cols: Vec<(i8, usize)> = cand.clone();
+        // Covered positions add nothing (as in `row_sum`), so they are not terms.
+        let mut cols: Vec<(i8, usize)> = cand.iter().copied().filter(|&(_, c)| self.at(r, c) != V::Covered).collect();
         cols.sort_by_key(|&(_, c)| c);
         let mut terms: Vec<Term> = Vec::new();
         for (sign, c) in cols {
@@ -922,11 +939,12 @@ impl<'a> Grid<'a> {
             if *strict {
                 // Rows where the total itself is 0 prove nothing about a column
                 // found without a label (parts that net to zero beside a dash).
-                let substantive =
-                    holding.iter().filter(|&&r| nonzero(r, cand) >= 2 && self.at(r, target) != V::Num(0.0)).count();
-                // More than half its rows, so a coincidence in some rows
-                // cannot assert a total that the others then fail.
-                if holding.len() < 2 || holding.len() * 2 <= rows.len() || substantive < 2 {
+                let informative = |r: &&usize| self.at(**r, target) != V::Num(0.0);
+                let substantive = holding.iter().filter(informative).filter(|&&r| nonzero(r, cand) >= 2).count();
+                // More than half its informative rows, so a coincidence in
+                // some rows cannot assert a total that the others then fail.
+                let (held, of) = (holding.iter().filter(informative).count(), rows.iter().filter(informative).count());
+                if held < 2 || held * 2 <= of || substantive < 2 {
                     continue;
                 }
             }
@@ -953,7 +971,11 @@ impl<'a> Grid<'a> {
             .min_by(|a, b| self.row_miss(target, &a.2).total_cmp(&self.row_miss(target, &b.2)));
         if let Some((rule, kind, cand, _)) = closest {
             out.unresolved.extend(self.emitted_rows(target, cand).into_iter().map(|r| emit(*rule, *kind, cand, r)));
+            return;
         }
+        // No candidate can even be read here: the total has nothing to sum.
+        let rows = self.data_rows().filter(|&r| matches!(self.at(r, target), V::Num(_)));
+        out.uncovered.extend(rows.map(|r| (Kind::Horizontal, self.table.index, r, target)));
     }
 }
 
@@ -1433,6 +1455,48 @@ mod tests {
         let all: Vec<(Status, Option<f64>)> =
             r.checks.iter().chain(&r.unresolved).map(|c| (c.status, c.difference)).collect();
         assert_eq!(all, [(Status::Fail, Some(-1.0))]);
+    }
+
+    #[test]
+    fn a_labelled_total_nothing_can_be_read_for_is_uncovered() {
+        // 갑 is a short row: its prior period is no cell, and the 당기 total is blank.
+        let d = doc(&table(&["구분", "당기", "전기"], &[&["갑", "10"], &["합계", "", "20"]]));
+        let r = foot(&d);
+        assert!(r.checks.is_empty() && r.unresolved.is_empty());
+        let uncovered: Vec<(usize, usize)> = r.uncovered.iter().map(|u| (u.cell.row, u.cell.col)).collect();
+        assert_eq!(uncovered, [(3, 3)]);
+    }
+
+    #[test]
+    fn a_position_a_span_covers_is_not_a_term() {
+        // 갑's 50 spans down to 병: a total of 갑 and 병 counts it once.
+        let d = doc(
+            "<TABLE><COLGROUP><COL/><COL/><COL/></COLGROUP><THEAD><TR><TH>구분</TH><TH>당기</TH><TH>전기</TH></TR></THEAD><TBODY>\
+             <TR><TD>갑</TD><TD ROWSPAN=\"3\">50</TD><TD>1</TD></TR><TR><TD>을</TD><TD>2</TD></TR><TR><TD>병</TD><TD>3</TD></TR>\
+             <TR><TD>합 계</TD><TD>50</TD><TD>6</TD></TR></TBODY></TABLE>",
+        );
+        let r = foot(&d);
+        let current = r.checks.iter().find(|c| c.id == "v:T1.R5.C2").unwrap();
+        assert_eq!((current.status, current.expected), (Status::Pass, Some(50.0)));
+        assert!(current.terms.iter().all(|t| t.rows.0 == 2), "{:?}", current.terms);
+    }
+
+    #[test]
+    fn rows_whose_total_is_zero_do_not_decide_an_unlabelled_column() {
+        // 2 informative rows hold and 2 disagree; the zero rows must not tip the balance.
+        let d = doc(&table(
+            &["구 분", "갑", "을", "병"],
+            &[
+                &["가", "10", "5", "15"],
+                &["나", "20", "5", "25"],
+                &["다", "30", "5", "99"],
+                &["라", "40", "5", "88"],
+                &["마", "7", "(7)", "-"],
+                &["바", "3", "(3)", "-"],
+            ],
+        ));
+        let r = foot(&d);
+        assert!(r.checks.iter().all(|c| c.target.col != 4), "{:?}", r.checks.iter().map(|c| &c.id).collect::<Vec<_>>());
     }
 
     #[test]

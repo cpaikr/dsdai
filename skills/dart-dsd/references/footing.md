@@ -58,7 +58,7 @@ cell outside its table makes the check `needsJudgment`, with a `reason`.
       "terms": [{"sign": 1, "table": 12, "row": 5, "col": 2}, {"sign": 1, "table": 12, "row": 8, "col": 2}],
       "note": "합계 is the 소계 above plus the one item below it"}],
     "dismiss": [
-     {"id": "v:T30.R4.C2", "target": {"table": 30, "row": 4, "col": 2, "rowLabel": "부채총계"},
+     {"id": "v:T30.R4.C2", "target": {"table": 30, "row": 4, "col": 2, "rowLabel": "부채총계", "colLabel": "당기말", "section": "30. 자본위험관리"},
       "reason": "a ratio table: 부채총계 is an input to the ratio, not the sum of the rows above"}]}
    ```
 

@@ -16,10 +16,10 @@
 //! A difference of 0 shows as ✓; one beyond its allowance is red. A check
 //! that needs judgment gets no formula; the `검증` sheet gives its reason.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 
-use super::{CheckResult, Origin, Report, Status, Unit, scale, table_units};
+use super::{CheckResult, Origin, Report, Status, Unit, rounding_slack, scale, table_units};
 use crate::doc::Doc;
 use crate::error::Result;
 use crate::sheets::{
@@ -138,12 +138,12 @@ pub fn render(doc: &Doc, report: &Report) -> Result<(Workbook, Vec<u8>)> {
     Ok((model, bytes))
 }
 
-/// `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),6)`, with references local to
+/// `=ROUND(target-(SUM(a)-SUM(b)+1000*SUM(c)),k)`, with references local to
 /// sheet `home` and qualified elsewhere; None when a table is not in the
 /// workbook. A spanning cell's figure is at its merge's first cell, so every
 /// position is read through the cell that owns it, as the CLI reads it.
-/// Rounding to 6 places (finer than any figure a document shows) keeps
-/// binary noise in decimal sums from showing as a difference.
+/// Rounding to `k` places (see [`places`]) removes binary noise but keeps
+/// every difference the evaluator reports.
 fn formula(
     doc: &Doc,
     model: &Workbook,
@@ -165,10 +165,11 @@ fn formula(
     let reference = |table: usize, rows: (usize, usize), cols: (usize, usize)| -> Option<String> {
         let p = placement.get(&table)?;
         let mut owners: Vec<(usize, usize)> = Vec::new();
+        let mut seen: HashSet<(usize, usize)> = HashSet::new();
         for r in rows.0..=rows.1 {
             for c in cols.0..=cols.1 {
                 let o = origin(table, r, c)?;
-                if !owners.contains(&o) {
+                if seen.insert(o) {
                     owners.push(o);
                 }
             }
@@ -199,8 +200,19 @@ fn formula(
         }
         let _ = write!(f, "SUM({range})");
     }
-    f.push_str("),6)");
+    let _ = write!(f, "),{})", places(check));
     Some(f)
+}
+
+/// Decimal places that hold every difference beyond the evaluator's rounding
+/// slack for this check but not the binary noise inside it: 13 for small
+/// figures, 1 around 10^12.
+fn places(check: &CheckResult) -> i32 {
+    let slack = rounding_slack(check.magnitude);
+    // f64 to i32 of a value between about -16 and 16.
+    #[allow(clippy::cast_possible_truncation)]
+    let k = (-slack.log10()).floor() as i32;
+    k
 }
 
 fn cell(row: u32, col: u16, value: Value, role: Role) -> Cell {
@@ -212,8 +224,16 @@ fn text(row: u32, col: u16, value: impl Into<String>, role: Role) -> Cell {
 }
 
 fn difference(row: u32, col: u16, formula: String, check: &CheckResult) -> Cell {
-    // As the formula computes it: rounded to 6 places, without a negative zero.
-    let result = check.difference.map_or_else(String::new, |d| format!("{}", (d * 1e6).round() / 1e6 + 0.0));
+    // As the formula computes it: noise within the slack is 0, the rest is
+    // rounded to the formula's places, without a negative zero.
+    let shown = |d: f64| {
+        if d.abs() <= rounding_slack(check.magnitude) {
+            return 0.0;
+        }
+        let unit = 10f64.powi(places(check));
+        (d * unit).round() / unit + 0.0
+    };
+    let result = check.difference.map_or_else(String::new, |d| format!("{}", shown(d)));
     cell(row, col, Value::Formula { formula, result, format: Some(DIFFERENCE_FORMAT.to_owned()) }, Role::Plain)
 }
 
@@ -489,12 +509,12 @@ mod tests {
         assert_eq!(
             formulas(sheet),
             pairs(&[
-                ("F7", "ROUND(D7-(SUM(B7:C7)),6)"),
-                ("F8", "ROUND(D8-(SUM(B8:C8)),6)"),
-                ("F9", "ROUND(D9-(SUM(B9:C9)),6)"),
-                ("B11", "ROUND(B9-(SUM(B7:B8)),6)"),
-                ("C11", "ROUND(C9-(SUM(C7:C8)),6)"),
-                ("D11", "ROUND(D9-(SUM(D7:D8)),6)"),
+                ("F7", "ROUND(D7-(SUM(B7:C7)),13)"),
+                ("F8", "ROUND(D8-(SUM(B8:C8)),12)"),
+                ("F9", "ROUND(D9-(SUM(B9:C9)),12)"),
+                ("B11", "ROUND(B9-(SUM(B7:B8)),12)"),
+                ("C11", "ROUND(C9-(SUM(C7:C8)),12)"),
+                ("D11", "ROUND(D9-(SUM(D7:D8)),12)"),
             ])
         );
         assert_eq!(shown(sheet, "A11"), "검증 R4 합 계 (auto)");
@@ -544,7 +564,7 @@ mod tests {
         ));
         let (wb, _) = render(&d, &foot(&d)).unwrap();
         let listed = formulas(wb.sheets.last().unwrap());
-        assert_eq!(listed[0], ("H4".to_owned(), "ROUND('재무상태표'!C9-(1000*SUM('주석4'!B8)),6)".to_owned()));
+        assert_eq!(listed[0], ("H4".to_owned(), "ROUND('재무상태표'!C9-(1000*SUM('주석4'!B8)),7)".to_owned()));
     }
 
     #[test]
@@ -607,7 +627,43 @@ mod tests {
         let (wb, _) = render(&d, &report).unwrap();
         let listed = formulas(&wb.sheets[1]);
         // The target C7 is inside the B7:C7 merge; so is the second term.
-        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),6)");
+        assert_eq!(listed[0].1, "ROUND(B7-(SUM(B5:C6)-SUM(B7)),12)");
+    }
+
+    #[test]
+    fn a_difference_finer_than_six_places_still_shows() {
+        // 0.0000004 is a real difference: the rounding keeps it.
+        let d = doc(&table(&["구 분", "당기"], &[&["가", "0.0000004"], &["합 계", "0.0000008"]]));
+        let mut report = foot(&d);
+        report.checks = crate::foot::evaluate(
+            &d,
+            &[crate::foot::Check {
+                id: "a:1".into(),
+                kind: crate::foot::Kind::Vertical,
+                origin: Origin::Agent,
+                rule: None,
+                target: crate::foot::CellRef {
+                    table: 1,
+                    row: 3,
+                    col: 2,
+                    row_label: None,
+                    col_label: None,
+                    section: None,
+                },
+                terms: vec![crate::foot::Term { sign: 1, table: 1, rows: (2, 2), cols: (2, 2) }],
+                tolerance: None,
+                note: Some("n".into()),
+            }],
+        )
+        .checks;
+        assert_eq!(report.checks[0].status, Status::Fail);
+        let (wb, _) = render(&d, &report).unwrap();
+        let cell = wb.sheets[1].cells.iter().find(|c| matches!(&c.value, Some(Value::Formula { .. }))).unwrap();
+        assert!(
+            matches!(&cell.value, Some(Value::Formula { result, .. }) if result == "0.0000004"),
+            "{:?}",
+            cell.value
+        );
     }
 
     #[test]
