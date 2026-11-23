@@ -60,6 +60,12 @@
       "prompt": "sample.dsd 재무상태표에 제 3 기 비교 열을 하나 더 추가하고, 주주 표에 주주 한 명을 추가해줘.",
       "hard_because": "Adding a column changes COL widths, the table WIDTH, and every row; the shareholder table has a header ROWSPAN/COLSPAN that must stay consistent.",
       "expected_output": "Uses copy-col --clear on T3 and copy-row --clear on a T4 body row (or apply), then sets the new header and cells with set-cell; leaves the original untouched; runs check --against with no new cell-width or cell-height warnings and diff or compare showing exactly the added column and row; reports the empty figures for the user to fill."
+    },
+    {
+      "id": 11,
+      "prompt": "이 감사보고서.dsd 재무제표와 주석 합계가 맞는지 검증(footing)해 주고, 확인용 엑셀도 만들어 줘.",
+      "hard_because": "Hundreds of totals must be checked without the agent doing arithmetic; proposals include wrong structures and true differences that must be told apart, and unresolved totals need judgment from the tables.",
+      "expected_output": "Runs dsd foot, reviews failed, unresolved, needsJudgment, candidate, and uncovered items by inspecting the tables with dsd table, writes a checks file holding only replacements, additions with notes, and dismissals with reasons (targets copied from the result), reruns with --checks until every remaining failure is a true difference, writes the workbook with -o, and reports each true difference with T#R#C#, labels, actual, expected, difference, and unit, plus stated tolerances, dismissals, and open items. Computes no figures itself, changes no figures, and keeps the checks file and workbook beside the document."
     }
   ]
 }

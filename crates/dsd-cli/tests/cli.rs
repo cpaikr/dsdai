@@ -1614,7 +1614,7 @@ fn xlsx_exports_sheets_typed_cells_merges_and_names() {
     assert_eq!(at(4, 2), Some(Data::Float(0.0)));
     assert_eq!(at(5, 2), Some(Data::String("5,6,32".into())), "a note-number list stays text");
     assert_eq!(at(6, 2), Some(Data::Float(2025.0)));
-    assert_eq!(at(7, 2), Some(Data::String("1,234 (*1)".into())));
+    assert_eq!(at(7, 2), Some(Data::Float(1234.0)), "a footnoted amount is a number");
     assert_eq!(at(8, 2), Some(Data::Float(0.125)));
     assert_eq!(range.get_value((row, col + 2)), Some(&Data::String("T6".into())), "marker beside the first row");
     let statement = book.worksheet_range("손익계산서").unwrap();
@@ -1717,4 +1717,374 @@ fn xlsx_exports_unverified_content_with_a_warning() {
     let mut book = open_xlsx(&out);
     let range = book.worksheet_range("재무상태표").unwrap();
     assert!(range.cells().any(|(_, _, d)| d == &Data::String("새 요소 글".into())));
+}
+
+/// The public fixture plus a note table whose prior-period total is off by
+/// 10, a total nothing explains, and a total with nothing above it.
+fn foot_variant(w: &Work) -> std::path::PathBuf {
+    let note = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH><TH>전 기</TH></TR></THEAD><TBODY>\
+<TR><TD>합 계</TD><TD>5</TD><TD>5</TD></TR>\
+<TR><TD>예금</TD><TD>100</TD><TD>80</TD></TR>\
+<TR><TD>현금</TD><TD>20</TD><TD>10</TD></TR>\
+<TR><TD>합 계</TD><TD>120</TD><TD>100</TD></TR>\
+<TR><TD>기타</TD><TD>7</TD><TD>7</TD></TR>\
+<TR><TD>총 계</TD><TD>1,000</TD><TD>1,000</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    w.variant("foot.dsd", &xml)
+}
+
+#[test]
+fn foot_proposes_checks_and_reports_unresolved_and_uncovered_totals() {
+    let w = Work::new("foot");
+    let src = foot_variant(&w);
+    let run = dsd(["foot", &s(&src)]);
+    let r = run.ok();
+    assert!(run.stderr.is_empty());
+    let checks = r["checks"].as_array().unwrap();
+    // The fixture's balance sheet: a subtotal over its detail lines.
+    let first = &checks[0];
+    assert_eq!(
+        (first["id"].as_str(), first["rule"].as_str(), first["status"].as_str()),
+        (Some("v:T3.R3.C2"), Some("hierarchy"), Some("pass"))
+    );
+    assert_eq!(first["terms"], json!([{"sign": 1, "table": 3, "rows": [4, 5], "col": 2}]));
+    assert_eq!(first["target"]["rowLabel"], "Ⅰ.유동자산");
+    // The note: 합계 holds in the current period, so the prior period's
+    // difference is a finding, with the table's unit.
+    let note = |id: &str| checks.iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("{id}: {checks:?}"));
+    let current = note("v:T5.R5.C2");
+    assert_eq!((current["status"].as_str(), current["unit"].as_str()), (Some("pass"), Some("원")));
+    let prior = note("v:T5.R5.C3");
+    assert_eq!((prior["status"].as_str(), prior["difference"].as_f64()), (Some("fail"), Some(10.0)));
+    assert_eq!(prior["terms"], json!([{"sign": 1, "table": 5, "rows": [3, 4], "col": 3}]));
+    // 총계 matches nothing: unresolved, with its closest candidate evaluated.
+    let unresolved: Vec<(&str, &str)> = r["unresolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["id"].as_str().unwrap(), c["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(unresolved, [("v:T5.R7.C2", "fail"), ("v:T5.R7.C3", "fail")]);
+    // The first 합계 has nothing above it.
+    let uncovered: Vec<(u64, u64)> = r["uncovered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| (u["row"].as_u64().unwrap(), u["col"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(uncovered, [(2, 2), (2, 3)]);
+    assert_eq!(r["uncovered"][0]["kind"], "vertical");
+    let count = |status: &str| checks.iter().filter(|c| c["status"] == status).count();
+    assert_eq!(
+        r["counts"],
+        json!({"pass": count("pass"), "fail": 1, "needsJudgment": 0, "unresolved": 2, "candidates": 0, "uncovered": 2, "dismissed": 0, "moved": 0, "stale": 0}),
+        "a failed check is a finding, not a failed command"
+    );
+}
+
+#[test]
+fn foot_reports_a_missing_file() {
+    let w = Work::new("foot-missing");
+    dsd(["foot", &s(&w.path("absent.dsd"))]).fails("file_not_found");
+}
+
+/// The public fixture plus a statement naming notes 4 and 5, and those
+/// notes: one holds both periods, one only the current period, and note 5
+/// also has a 당기/전기 pair of movement tables.
+fn foot_cross_variant(w: &Work) -> std::path::PathBuf {
+    let row =
+        |cells: &[&str]| format!("<TR>{}</TR>", cells.iter().map(|c| format!("<TD>{c}</TD>")).collect::<String>());
+    let head =
+        |cells: &[&str]| format!("<TR>{}</TR>", cells.iter().map(|c| format!("<TH>{c}</TH>")).collect::<String>());
+    let table = |cols: usize, header: &[&str], rows: &[&[&str]]| {
+        format!(
+            "<TABLE BORDER=\"1\"><COLGROUP>{}</COLGROUP><THEAD>{}</THEAD><TBODY>{}</TBODY></TABLE>\r\n",
+            "<COL WIDTH=\"100\"></COL>".repeat(cols),
+            head(header),
+            rows.iter().map(|r| row(r)).collect::<String>()
+        )
+    };
+    let unit = "<P>(단위: 원)</P>\r\n";
+    let statement = format!(
+        "<TABLE BORDER=\"0\"><COLGROUP><COL WIDTH=\"600\"></COL></COLGROUP><TBODY><TR><TD>재 무 상 태 표</TD></TR></TBODY></TABLE>\r\n{unit}{}",
+        table(
+            4,
+            &["과 목", "주 석", "당 기", "전 기"],
+            &[&["현금", "4", "1,000", "900"], &["토지", "5", "300", "260"]]
+        )
+    );
+    let notes = format!(
+        "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>4. 현금</P>\r\n{unit}{}<P>5. 토지</P>\r\n<P>(1) 당기</P>\r\n{unit}{}<P>(2) 전기</P>\r\n{unit}{}</SECTION-2>\r\n",
+        table(3, &["구 분", "당기말", "전기말"], &[&["보통예금", "1,000", "900"]]),
+        table(4, &["구 분", "기초", "취득", "기말"], &[&["토지", "250", "50", "300"]]),
+        table(4, &["구 분", "기초", "취득", "기말"], &[&["토지", "200", "40", "240"]]),
+    );
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{statement}{notes}"));
+    w.variant("foot-cross.dsd", &xml)
+}
+
+#[test]
+fn foot_matches_statement_lines_with_their_notes_and_openings_with_prior_closings() {
+    let w = Work::new("foot-cross");
+    let r = dsd(["foot", &s(&foot_cross_variant(&w))]).ok();
+    let cross: Vec<(&str, &str, &str)> = r["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"].as_str().unwrap().starts_with("x:"))
+        .map(|c| (c["id"].as_str().unwrap(), c["rule"].as_str().unwrap(), c["status"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        cross,
+        [
+            // 현금: note 4 holds both periods.
+            ("x:T6.R2.C3/T7", "statement-note", "pass"),
+            ("x:T6.R2.C4/T7", "statement-note", "pass"),
+            // The current 토지 opens at 250; the prior table closes at 240.
+            ("x:T8.R2.C2", "prior-closing", "fail"),
+        ]
+    );
+    // 토지: note 5 shows the current amount (300) but not the prior one (260).
+    let candidates: Vec<&str> = r["candidates"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(candidates, ["x:T6.R3.C3/T8"]);
+    assert_eq!(r["candidates"][0]["terms"], json!([{"sign": 1, "table": 8, "row": 2, "col": 4}]));
+    assert_eq!(r["counts"]["candidates"], 1);
+}
+
+#[test]
+fn foot_applies_a_checks_file_and_refuses_an_invalid_one() {
+    let w = Work::new("foot-checks");
+    let src = foot_variant(&w);
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        r#"{"checks": [{"id": "v:T5.R5.C3", "kind": "vertical", "origin": "agent",
+            "target": {"table": 5, "row": 5, "col": 3, "rowLabel": "합 계", "colLabel": "전 기"},
+            "terms": [{"sign": 1, "table": 5, "rows": [3, 4], "col": 3}],
+            "tolerance": {"absolute": 10}, "note": "the prior period is rounded"}],
+           "dismiss": [{"id": "v:T5.R5.C2", "target": {"table": 5, "row": 5, "col": 2, "rowLabel": "합 계"},
+            "reason": "checked by hand"},
+            {"id": "v:T5.R6.C2", "target": {"table": 5, "row": 9, "col": 2, "rowLabel": "기타", "section": "주 석"}, "reason": "old draft"}]}"#,
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let replaced = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == "v:T5.R5.C3").unwrap();
+    assert_eq!(
+        (replaced["origin"].as_str(), replaced["status"].as_str(), replaced["allowed"].as_f64()),
+        (Some("agent"), Some("pass"), Some(10.0))
+    );
+    assert!(r["checks"].as_array().unwrap().iter().all(|c| c["id"] != "v:T5.R5.C2"));
+    // The dismissed proposal's target as the document has it now, section included.
+    assert_eq!(
+        r["dismissed"],
+        json!([{"id": "v:T5.R5.C2", "reason": "checked by hand",
+            "target": {"table": 5, "row": 5, "col": 2, "rowLabel": "합 계", "colLabel": "당 기", "section": "주 석"}}])
+    );
+    // The second dismissal names a row the table does not have; in its section 기타 is
+    // only at R6, so it moved (without the section, a 기타 in a table nearby makes it ambiguous).
+    assert_eq!(r["moved"][0]["entry"], "dismissal");
+    assert_eq!((r["moved"][0]["found"]["row"].as_u64(), r["moved"][0]["found"]["col"].as_u64()), (Some(6), Some(2)));
+    assert!(r["moved"][0]["there"].get("rowLabel").is_none(), "the stated cell does not exist");
+    assert_eq!(
+        (r["counts"]["dismissed"].as_u64(), r["counts"]["moved"].as_u64(), r["counts"]["stale"].as_u64()),
+        (Some(1), Some(1), Some(0))
+    );
+
+    std::fs::write(&checks, r#"{"checks": [{"id": "a", "kind": "vertical", "origin": "auto", "target": {"table": 1, "row": 1, "col": 1}, "terms": [{"sign": 1, "table": 1, "row": 1, "col": 1}], "note": "n"}]}"#).unwrap();
+    let run = dsd(["foot", &s(&src), "--checks", &s(&checks)]);
+    run.fails("invalid_argument");
+    assert!(run.error_text().contains("checks[0] (a): a checks file states agent checks"), "{}", run.error_text());
+    dsd(["foot", &s(&src), "--checks", &s(&w.path("absent.json"))]).fails("io_error");
+}
+
+#[test]
+fn foot_writes_a_workbook_with_a_formula_per_check() {
+    use calamine::{Data, Reader};
+    let w = Work::new("foot-workbook");
+    let src = foot_variant(&w);
+    let out = w.path("footing.xlsx");
+    let r = dsd(["foot", &s(&src), "-o", &s(&out)]).ok();
+    let book = &r["workbook"];
+    assert_eq!(book["output"], s(&out));
+    assert_eq!(book["bytes"].as_u64(), Some(std::fs::metadata(&out).unwrap().len()));
+    // The note table (T5) moved down by its check rows' room; its range says where it is now.
+    let t5 = book["tables"].as_array().unwrap().iter().find(|t| t["table"] == 5).unwrap();
+    let (sheet, top, left) = grid_origin(t5);
+    let mut xlsx = open_xlsx(&out);
+    let names = xlsx.sheet_names();
+    assert_eq!(names.last().map(String::as_str), Some("검증"));
+    // T5's prior-period 합 계 (R5C3) is off by 10: its check row holds the live difference.
+    let formulas = xlsx.worksheet_formula(&sheet).unwrap();
+    let values = xlsx.worksheet_range(&sheet).unwrap();
+    let below = top + 7 + 1; // 7 rows, one blank row, then the check rows
+    let f = formulas.get_value((below, left + 2)).unwrap();
+    let target = format!("{}{}", char::from(b'A' + u8::try_from(left + 2).unwrap()), top + 5);
+    assert!(f.starts_with(&format!("ROUND({target}-(SUM(")), "{f}");
+    assert_eq!(values.get_value((below, left + 2)), Some(&Data::Float(10.0)));
+    // 총괄표 counts the checks sheet by formula.
+    let index = xlsx.worksheet_formula("총괄표").unwrap();
+    assert!(index.used_cells().any(|(_, _, f)| f.starts_with("COUNTIFS('검증'!$A$4:$A$")));
+    // The run is byte-identical, and its output is guarded like any other.
+    let again = w.path("again.xlsx");
+    dsd(["foot", &s(&src), "-o", &s(&again)]).ok();
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(&again).unwrap());
+    dsd(["foot", &s(&src), "-o", &s(&out)]).fails("output_exists");
+    dsd(["foot", &s(&src), "-o", &s(&out), "--force"]).ok();
+    dsd(["foot", &s(&src), "-o", "-"]).fails("invalid_argument");
+    dsd(["foot", &s(&src), "-o", &s(&src), "--force"]).fails("output_exists");
+}
+
+#[test]
+fn foot_reports_a_small_difference_in_large_amounts_and_survives_any_table_number() {
+    let w = Work::new("foot-large");
+    let note = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH></TR></THEAD><TBODY>\
+<TR><TD>갑</TD><TD>1,000,000,000,000</TD></TR>\
+<TR><TD>을</TD><TD>500</TD></TR>\
+<TR><TD>합 계</TD><TD>1,000,000,000,000</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    let src = w.variant("large.dsd", &xml);
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        format!(
+            r#"{{"checks": [{{"id": "a:total", "kind": "vertical", "origin": "agent",
+                "target": {{"table": 5, "row": 4, "col": 2, "rowLabel": "합 계"}},
+                "terms": [{{"sign": 1, "table": 5, "rows": [2, 3], "col": 2}}], "note": "합계 sums its rows"}}],
+               "dismiss": [{{"id": "x", "target": {{"table": {}, "row": 1, "col": 1, "rowLabel": "합 계"}}, "reason": "r"}}]}}"#,
+            usize::MAX
+        ),
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let total = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == "a:total").unwrap();
+    assert_eq!((total["status"].as_str(), total["difference"].as_f64()), (Some("fail"), Some(-500.0)));
+    assert_eq!(r["stale"][0]["id"], "x", "a table number past the document is stale, not a crash");
+}
+
+#[test]
+fn foot_compares_tables_only_in_units_it_can_read() {
+    let w = Work::new("foot-units");
+    let table = |unit: &str, figure: &str| {
+        format!(
+            "<P>(단위: {unit})</P>\r\n<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH></TR></THEAD><TBODY><TR><TD>가</TD><TD>{figure}</TD></TR></TBODY></TABLE>\r\n"
+        )
+    };
+    let note = format!(
+        "<SECTION-2><TITLE>주 석</TITLE>\r\n{}{}{}{}</SECTION-2>\r\n",
+        table("미상", "10"),
+        table("미상", "10"),
+        table("주", "10"),
+        table("주", "10")
+    );
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    let src = w.variant("units.dsd", &xml);
+    let checks = w.path("checks.json");
+    let cross = |id: &str, target: usize, source: usize| {
+        format!(
+            r#"{{"id": "{id}", "kind": "cross", "origin": "agent", "target": {{"table": {target}, "row": 2, "col": 2}},
+                "terms": [{{"sign": 1, "table": {source}, "row": 2, "col": 2}}], "note": "the same figure"}}"#
+        )
+    };
+    std::fs::write(&checks, format!(r#"{{"checks": [{}, {}]}}"#, cross("a:unknown", 6, 5), cross("a:shares", 8, 7)))
+        .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let status = |id: &str| {
+        let c = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == id).unwrap();
+        (c["status"].as_str().unwrap().to_owned(), c["reason"].as_str().map(str::to_owned))
+    };
+    let (unknown, reason) = status("a:unknown");
+    assert_eq!(unknown, "needsJudgment", "two captions naming an unreadable unit are not comparable");
+    assert!(reason.unwrap().contains("unit"));
+    assert_eq!(status("a:shares").0, "pass", "a known non-money unit compares with itself");
+}
+
+#[test]
+fn foot_reports_an_entry_moved_when_quarter_columns_trade_places() {
+    let w = Work::new("foot-quarters");
+    let note = |first: &str, second: &str| {
+        format!(
+            "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>{first}</TH><TH>{second}</TH></TR></THEAD><TBODY>\
+<TR><TD>가</TD><TD>10</TD><TD>20</TD></TR><TR><TD>합 계</TD><TD>10</TD><TD>20</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n"
+        )
+    };
+    let variant = |name: &str, first: &str, second: &str| {
+        let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{}", note(first, second)));
+        w.variant(name, &xml)
+    };
+    let before = variant("before.dsd", "Ⅰ 분기", "Ⅱ 분기");
+    let after = variant("after.dsd", "Ⅱ 분기", "Ⅰ 분기");
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        r#"{"checks": [{"id": "a:q1", "kind": "vertical", "origin": "agent",
+            "target": {"table": 5, "row": 3, "col": 2, "rowLabel": "합 계", "colLabel": "Ⅰ 분기"},
+            "terms": [{"sign": 1, "table": 5, "row": 2, "col": 2}], "note": "the quarter's total"}]}"#,
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&before), "--checks", &s(&checks)]).ok();
+    assert!(r["checks"].as_array().unwrap().iter().any(|c| c["id"] == "a:q1"), "applies where its labels are");
+    let r = dsd(["foot", &s(&after), "--checks", &s(&checks)]).ok();
+    assert!(r["checks"].as_array().unwrap().iter().all(|c| c["id"] != "a:q1"), "not applied to the other quarter");
+    assert_eq!(r["moved"][0]["id"], "a:q1");
+    assert_eq!(
+        (r["moved"][0]["found"]["col"].as_u64(), r["moved"][0]["there"]["colLabel"].as_str()),
+        (Some(3), Some("Ⅱ 분기"))
+    );
+}
+
+#[test]
+fn foot_pairs_prior_closings_only_when_each_table_has_one_fit() {
+    let w = Work::new("foot-ambiguous");
+    let movement = |caption: &str, open: &str, close: &str| {
+        format!(
+            "<P>{caption}</P>\r\n<P>(단위: 원)</P>\r\n<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL><COL WIDTH=\"100\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>기초</TH><TH>증가</TH><TH>기말</TH></TR></THEAD><TBODY><TR><TD>토지</TD><TD>{open}</TD><TD>10</TD><TD>{close}</TD></TR></TBODY></TABLE>\r\n"
+        )
+    };
+    let note = |tables: &[String]| {
+        format!("<SECTION-2><TITLE>주 석</TITLE>\r\n<P>유형자산</P>\r\n{}</SECTION-2>\r\n", tables.concat())
+    };
+    let run = |name: &str, tables: &[String]| {
+        let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{}", note(tables)));
+        let r = dsd(["foot", &s(&w.variant(name, &xml))]).ok();
+        r["checks"].as_array().unwrap().iter().filter(|c| c["rule"] == "prior-closing").count()
+    };
+    let current = movement("(1) 당기 취득원가", "100", "110");
+    let prior = movement("(2) 전기 취득원가", "90", "100");
+    assert_eq!(run("one.dsd", &[current.clone(), prior.clone()]), 1, "one current and one prior table pair");
+    assert_eq!(run("two.dsd", &[current.clone(), current, prior]), 0, "the prior table fits two: ambiguous");
+}
+
+#[test]
+fn foot_needs_judgment_for_figures_beyond_the_compared_places() {
+    let w = Work::new("foot-places");
+    let note = "<SECTION-2><TITLE>주 석</TITLE>\r\n<P>(단위: 원)</P>\r\n\
+<TABLE BORDER=\"1\"><COLGROUP><COL WIDTH=\"200\"></COL><COL WIDTH=\"150\"></COL></COLGROUP>\
+<THEAD><TR><TH>구 분</TH><TH>당 기</TH></TR></THEAD><TBODY>\
+<TR><TD>가</TD><TD>0</TD></TR><TR><TD>나</TD><TD>0.0000000000000000000000000000001</TD></TR>\
+</TBODY></TABLE>\r\n</SECTION-2>\r\n";
+    let xml = replace_once(&w.contents(), "</SECTION-2>", &format!("</SECTION-2>\r\n{note}"));
+    let src = w.variant("places.dsd", &xml);
+    let checks = w.path("checks.json");
+    std::fs::write(
+        &checks,
+        r#"{"checks": [{"id": "a:tiny", "kind": "vertical", "origin": "agent",
+            "target": {"table": 5, "row": 3, "col": 2}, "terms": [{"sign": 1, "table": 5, "row": 2, "col": 2}],
+            "note": "a 31-place figure against 0"}]}"#,
+    )
+    .unwrap();
+    let r = dsd(["foot", &s(&src), "--checks", &s(&checks)]).ok();
+    let c = r["checks"].as_array().unwrap().iter().find(|c| c["id"] == "a:tiny").unwrap();
+    assert_eq!(c["status"], "needsJudgment", "not compared at a precision that would hide its digits");
+    assert!(c["reason"].as_str().unwrap().contains("31 decimal places"));
 }

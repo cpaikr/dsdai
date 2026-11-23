@@ -15,6 +15,7 @@ pub mod difflib;
 pub mod doc;
 pub mod edit;
 mod error;
+pub mod foot;
 pub mod schema;
 pub mod sheets;
 pub mod structure;

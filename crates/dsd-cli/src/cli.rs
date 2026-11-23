@@ -18,6 +18,7 @@ Typical flow:
   6. dsd check out.dsd --against report.dsd && dsd diff report.dsd out.dsd
   7. dsd compare filed.dsd draft.dsd --format html -o compare.html
   8. dsd xlsx report.dsd -o report.xlsx      statements, notes, tables as a workbook
+  9. dsd foot report.dsd                     proposed footing checks and results
 
 Output:
   Commands print one JSON object to stdout: {ok, command, result, warnings,
@@ -116,6 +117,69 @@ highlighted, a change map, a section index, next/previous navigation (n/p), a
 changes-only filter, and a panel listing the selected item's changes (i). The report is one self-contained file
 with no external resources; it needs -o.";
 
+const FOOT_AFTER: &str = "Every check is target = Σ sign × term over T/R/C cells. Proposers find
+cells that should be totals and keep the structure that holds in the most
+period columns:
+  label-total      a row labelled 합계, 소계, 총계, or 계 sums the rows above
+  hierarchy        a numbered or indented line sums the lines under it,
+                   including a statement's subtotal column over its detail one
+  signed-sum       a statement line is a signed sum of the lines above it
+                   (kept only when it holds in every period)
+  movement         closing = opening + movements; an opening repeats the
+                   closing above it
+  column-total     a total column, or an unlabelled column that sums the
+                   columns left of it in more than half its rows
+  column-movement  closing column = opening column + movement columns
+  identity         자산총계 = 부채와자본총계 (or 부채총계 + 자본총계)
+  statement-note   a statement line's amounts appear in a note it names
+                   (its 주석 column or a (주4) label), for both periods
+  prior-closing    the current period opens with the prior period's closing,
+                   in one table or across a 당기/전기 pair of tables
+
+Check ids are v: (down a column), h: (across a row), i: (identity), or x:
+(across tables or periods) plus the target T#.R#.C#. result.checks lists each check
+with its terms and status (pass, fail, or needsJudgment with a reason). A
+check passes only when its difference is 0.
+Values are read as `dsd xlsx` types them; a blank or a lone - is 0. Note
+reference columns (주석) are never summed. Tables in different units convert
+when both captions name a currency unit (원, 천원, 백만원, 억원, 십억원); other
+units (주, 명, USD, ...) compare only with the same unit.
+
+result.unresolved lists labelled totals no structure explains, each with its
+closest candidate evaluated: a request for judgment, not an error.
+result.candidates lists statement amounts found in their notes for one
+period only (including lines that show one period). result.uncovered lists
+labelled totals with nothing to sum and statement amounts their notes do not
+show.
+
+--checks applies the agent's overlay, which states only decisions:
+  {\"checks\":  [{\"id\", \"kind\", \"origin\": \"agent\", \"target\", \"terms\",
+                \"tolerance\"?, \"note\"}],
+   \"dismiss\": [{\"id\", \"target\", \"reason\"}]}
+A check whose id and target match a proposal replaces it (an unresolved
+total or a candidate included); any other check is added. A note (checks) or
+a reason (dismissals) is required. A target is {\"table\", \"row\", \"col\",
+\"rowLabel\", \"colLabel\", \"section\"}: copy it from a result (from an
+uncovered entry, without its kind). Labels compare without spacing or a
+leading list number; everything else must match. An entry applies only when
+its labels and section are still at its T/R/C. When they are at exactly one
+other cell (in its section, else within three tables) it is listed in
+result.moved with that cell; otherwise, or when a dismissal's proposal is
+gone, in result.stale with a reason. Neither is applied. result.dismissed
+lists the proposals a file dismissed, with their reasons. A file that is not
+a JSON object, has unknown fields, or repeats an id fails with
+invalid_argument.
+
+-o writes the footing workbook: the `dsd xlsx` workbook with each check as a
+live formula, its difference (target - the signed sum of its terms; 0 shows
+as a check mark, a difference beyond its allowance is red). A check down a
+table sits in a check row below it, in the target's column; a check across
+a row sits right of the table, in the target's row. The 검증 sheet lists
+every check (formulas of checks between tables are there), and 총괄표 counts
+each sheet's checks, passes, differences, and checks needing judgment by
+formula, so the counts follow corrections. Tables move down by the check
+rows, so result.workbook.tables gives each table's range in this workbook.";
+
 const XLSX_AFTER: &str = "Sheets: 총괄표 (an index linking every sheet) first, then 표지 and 목차, one
 sheet per titled PART, SECTION-1, or SECTION-2, one per statement (a table whose
 first cell names one, such as 재무상태표), and inside a 주석 region one per note
@@ -126,8 +190,9 @@ Each sheet has its title in row 1 and a link back to 총괄표 in row 2; content
 starts in row 4, one row per text line. Table cells keep their grid: spans
 become merged cells, TH cells are shaded, and a grey T# marker sits right of
 each table's first row. A cell becomes a number only when Excel shows exactly
-its text (1,234 / (1,234) / △1,234 / 12.5% / a lone - as zero); anything else,
-such as 5,6,32 or 1,234 (*1), stays text as `dsd table` reports it.
+its text (1,234 / (1,234) / △1,234 / 12.5% / a lone - as zero; a footnote
+marker such as 1,234 (*1) stays visible through the number format); anything
+else, such as 5,6,32, stays text as `dsd table` reports it.
 
 Each table's range is the defined name DSD_T<n>, and result.tables maps T# to
 its sheet and range, so cell (R, C) of T<n> is R-1 rows down and C-1 columns
@@ -257,6 +322,20 @@ C:\\DART\\Resource\\Dtd when present; without one it reports schema-skipped.")]
         output: PathBuf,
         /// Replace an existing output file (never the source .dsd).
         #[arg(long)]
+        force: bool,
+    },
+    /// Propose footing checks from labels, hierarchy, and layout, and evaluate them.
+    #[command(after_help = FOOT_AFTER)]
+    Foot {
+        file: PathBuf,
+        /// JSON checks file: {"checks": [...], "dismiss": [...]}; see below.
+        #[arg(long, value_name = "CHECKS")]
+        checks: Option<PathBuf>,
+        /// Also write the footing workbook: the xlsx export plus a formula per check.
+        #[arg(short, long, value_name = "OUT")]
+        output: Option<PathBuf>,
+        /// Replace an existing output file (never the source .dsd or the checks file).
+        #[arg(long, requires = "output")]
         force: bool,
     },
     /// Changed cells and text blocks between two .dsd files, then raw line and member changes.
@@ -506,6 +585,7 @@ impl Command {
             Self::Check { .. } => "check",
             Self::Compare { .. } => "compare",
             Self::Xlsx { .. } => "xlsx",
+            Self::Foot { .. } => "foot",
             Self::Diff { .. } => "diff",
             Self::SetCell { .. } => "set-cell",
             Self::Replace { .. } => "replace",

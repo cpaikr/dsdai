@@ -24,8 +24,59 @@ enum Negative {
 }
 
 /// `Some` when `text` is a figure whose Excel rendering matches it.
+///
+/// Footnote markers after a figure (`1,234 (*1)`, `500(주2)`) are kept as a
+/// literal in every section of the number format, so the cell still reads
+/// exactly as written while formulas see the number.
 pub fn parse(text: &str) -> Option<Amount> {
-    let t = text.trim();
+    let (figure, marker) = split_footnotes(text.trim());
+    if marker.is_empty() {
+        return parse_figure(figure);
+    }
+    if figure == "-" {
+        // A nil dash with a marker would need its own zero section; it stays text.
+        return None;
+    }
+    let Amount { value, format } = parse_figure(figure)?;
+    let format = format.split(';').map(|section| format!("{section}\"{marker}\"")).collect::<Vec<_>>().join(";");
+    Some(Amount { value, format })
+}
+
+/// The figure and the footnote markers after it, with the whitespace that
+/// separates them kept in the marker part.
+fn split_footnotes(text: &str) -> (&str, &str) {
+    let mut end = text.len();
+    loop {
+        let head = text[..end].trim_end();
+        let Some(open) = head.strip_suffix(')').and_then(|h| h.rfind('(')) else { break };
+        if !is_footnote_marker(&head[open + 1..head.len() - 1]) {
+            break;
+        }
+        let rest = head[..open].trim_end();
+        if rest.is_empty() {
+            break;
+        }
+        end = rest.len();
+    }
+    (&text[..end], &text[end..])
+}
+
+/// `*`, `*1`, `*1,2`, or `주1`: the markers DART notes use for footnotes.
+fn is_footnote_marker(inner: &str) -> bool {
+    let digits = if let Some(d) = inner.strip_prefix('*') {
+        if d.is_empty() {
+            return true;
+        }
+        d
+    } else if let Some(d) = inner.strip_prefix('주') {
+        d
+    } else {
+        return false;
+    };
+    !digits.is_empty() && digits.split(',').all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn parse_figure(t: &str) -> Option<Amount> {
     if t == "-" {
         // A nil dash: zero that still reads as a dash.
         return Some(Amount { value: 0.0, format: "#,##0;-#,##0;\"-\"".to_owned() });
@@ -204,8 +255,11 @@ mod tests {
             "00",               // leading zero
             "1234567890123456", // 16 significant digits
             "+1,234",           // explicit plus
-            "1,234 (*1)",       // footnote marker
-            "(*1) 1,234",
+            "(*1) 1,234",       // a marker before the figure
+            "- (*1)",           // a nil dash with a marker
+            "1,234 (*a)",       // not a footnote marker
+            "1,234 (참고)",
+            "(*1)",
             "2025.12.31", // date
             "2025-12-31",
             "1 234",  // internal space
@@ -224,6 +278,15 @@ mod tests {
         ] {
             assert_eq!(parse(text), None, "{text:?} must stay text");
         }
+    }
+
+    #[test]
+    fn footnote_markers_stay_visible_in_the_format() {
+        assert_eq!(num("1,234 (*1)"), (1234.0, "#,##0\" (*1)\"".into()));
+        assert_eq!(num("1,234(*1)(*2)"), (1234.0, "#,##0\"(*1)(*2)\"".into()));
+        assert_eq!(num("500 (주3)"), (500.0, "0\" (주3)\"".into()));
+        assert_eq!(num("(1,234) (*1,2)"), (-1234.0, "#,##0\" (*1,2)\";(#,##0)\" (*1,2)\"".into()));
+        assert_eq!(num("△12.5% (*)"), (-0.125, "0.0%\" (*)\";\"△\"0.0%\" (*)\"".into()));
     }
 
     #[test]

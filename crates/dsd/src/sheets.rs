@@ -55,6 +55,8 @@ pub enum SheetKind {
     Section,
     Statement,
     Note,
+    /// The footing checks (`dsd foot -o`).
+    Checks,
 }
 
 impl SheetKind {
@@ -68,6 +70,7 @@ impl SheetKind {
             Self::Section => "섹션",
             Self::Statement => "재무제표",
             Self::Note => "주석",
+            Self::Checks => "검증",
         }
     }
 }
@@ -84,6 +87,13 @@ pub enum Value {
     Link {
         sheet: usize,
         text: String,
+    },
+    /// A formula (`=...`) with the result it computes now, so a reader that
+    /// does not recalculate shows the same value.
+    Formula {
+        formula: String,
+        result: String,
+        format: Option<String>,
     },
 }
 
@@ -113,6 +123,14 @@ pub struct Cell {
     pub border: bool,
     /// The text holds line breaks.
     pub wrap: bool,
+}
+
+/// A cell shown in red when its value is outside `-allowed..=allowed`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flag {
+    pub row: u32,
+    pub col: u16,
+    pub allowed: f64,
 }
 
 /// A merged range; its value and style are those of the cell at its top left.
@@ -188,6 +206,8 @@ pub struct Sheet {
     pub tables: Vec<usize>,
     /// Rows in use.
     pub rows: u32,
+    /// Cells shown in red outside their allowance.
+    pub flags: Vec<Flag>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -213,6 +233,12 @@ pub struct Workbook {
 
 /// Build the workbook model for a document.
 pub fn workbook(doc: &Doc) -> Result<Workbook> {
+    workbook_with(doc, &|_| 0)
+}
+
+/// The workbook model with `below(T#)` empty rows reserved under each table
+/// (for the footing checks of that table).
+pub fn workbook_with(doc: &Doc, below: &dyn Fn(usize) -> u32) -> Result<Workbook> {
     let mut warnings = Vec::new();
     if let Some(schema) = unverified_schema(doc) {
         warnings.push(Issue::warning(
@@ -241,12 +267,14 @@ pub fn workbook(doc: &Doc) -> Result<Workbook> {
         frozen_rows: 3,
         tables: Vec::new(),
         rows: 0,
+        flags: Vec::new(),
     }];
     let mut placements = Vec::new();
     let mut counts = Counts::default();
     for (part, name) in parts.iter().zip(names) {
         let sheet = sheets.len();
         let mut layout = Layout::new(doc, sheet, name, part, &mut placements, &mut counts, &mut warnings);
+        layout.below = below;
         for block in &part.blocks {
             layout.place(block)?;
         }
@@ -595,6 +623,7 @@ struct Layout<'a> {
     placements: &'a mut Vec<Placement>,
     counts: &'a mut Counts,
     warnings: &'a mut Vec<Issue>,
+    below: &'a dyn Fn(usize) -> u32,
 }
 
 impl<'a> Layout<'a> {
@@ -617,6 +646,7 @@ impl<'a> Layout<'a> {
             frozen_rows: 2,
             tables: Vec::new(),
             rows: 0,
+            flags: Vec::new(),
         };
         sheet.cells.push(text_cell(0, 0, part.title.clone(), Role::Title));
         sheet.cells.push(Cell {
@@ -627,7 +657,17 @@ impl<'a> Layout<'a> {
             border: false,
             wrap: false,
         });
-        Self { doc, sheet, index, row: FIRST_CONTENT_ROW, after_table: false, placements, counts, warnings }
+        Self {
+            doc,
+            sheet,
+            index,
+            row: FIRST_CONTENT_ROW,
+            after_table: false,
+            placements,
+            counts,
+            warnings,
+            below: &|_| 0,
+        }
     }
 
     fn place(&mut self, block: &Block) -> Result<()> {
@@ -762,7 +802,7 @@ impl<'a> Layout<'a> {
         }
         self.placements.push(Placement { table: index, sheet: self.index, row: top, col: 0, rows, cols });
         self.sheet.tables.push(index);
-        self.row = top + rows;
+        self.row = top + rows + (self.below)(index);
         Ok(())
     }
 
@@ -813,7 +853,7 @@ fn check_length(text: &str, place: impl FnOnce() -> String) -> Result<()> {
     Ok(())
 }
 
-fn index_sheet(sheets: &[Sheet]) -> Sheet {
+pub(crate) fn index_sheet(sheets: &[Sheet]) -> Sheet {
     let mut cells = vec![text_cell(0, 0, INDEX_SHEET.to_owned(), Role::Title)];
     for (col, label) in ["시트", "구분", "제목"].into_iter().enumerate() {
         cells.push(text_cell(2, col as u16, label.to_owned(), Role::Header));
@@ -842,6 +882,7 @@ fn index_sheet(sheets: &[Sheet]) -> Sheet {
         frozen_rows: 3,
         tables: Vec::new(),
         rows,
+        flags: Vec::new(),
     }
 }
 
@@ -1024,11 +1065,11 @@ mod tests {
                 number(2025.0, "0"),
                 number(0.0, "#,##0;-#,##0;\"-\""),
                 number(0.125, "0.0%"),
-                Some(Value::Text("1,234 (*1)".into())),
+                number(1234.0, "#,##0\" (*1)\""),
                 None,
             ]
         );
-        assert_eq!((wb.counts.number_cells, wb.counts.text_cells), (5, 2));
+        assert_eq!((wb.counts.number_cells, wb.counts.text_cells), (6, 1));
     }
 
     #[test]

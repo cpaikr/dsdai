@@ -7,7 +7,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rust_xlsxwriter::{
-    Color, DocProperties, ExcelDateTime, Format, FormatAlign, FormatBorder, Url, Workbook as Book, Worksheet, XlsxError,
+    Color, ConditionalFormatCell, ConditionalFormatCellRule, DocProperties, ExcelDateTime, Format, FormatAlign,
+    FormatBorder, Formula, Url, Workbook as Book, Worksheet, XlsxError,
 };
 
 use crate::doc::Doc;
@@ -27,6 +28,9 @@ const WIDE_GLYPH_PX: u32 = 15;
 const NARROW_GLYPH_PX: u32 = 8;
 const CELL_PADDING_PX: u32 = 8;
 const MARKER_GREY: u32 = 0x0080_8080;
+/// Excel's "light red fill with dark red text".
+const FLAG_FILL: u32 = 0x00FF_C7CE;
+const FLAG_TEXT: u32 = 0x009C_0006;
 
 /// The workbook model and its xlsx bytes.
 pub fn export(doc: &Doc) -> Result<(Workbook, Vec<u8>)> {
@@ -122,7 +126,17 @@ fn write_sheet(ws: &mut Worksheet, sheet: &Sheet, model: &Workbook) -> std::resu
                 let url = Url::new(format!("internal:{}!A1", quoted(&model.sheets[*target].name))).set_text(text);
                 ws.write_url(cell.row, cell.col, url)?;
             }
+            Some(Value::Formula { formula, result, format }) => {
+                let f = Formula::new(formula).set_result(result);
+                ws.write_formula_with_format(cell.row, cell.col, f, &format_of(cell, format.as_deref()))?;
+            }
         }
+    }
+    let flagged = Format::new().set_font_color(Color::RGB(FLAG_TEXT)).set_background_color(Color::RGB(FLAG_FILL));
+    for flag in &sheet.flags {
+        let rule = ConditionalFormatCellRule::NotBetween(-flag.allowed, flag.allowed);
+        let cf = ConditionalFormatCell::new().set_rule(rule).set_format(&flagged);
+        ws.add_conditional_format(flag.row, flag.col, flag.row, flag.col, &cf)?;
     }
     Ok(())
 }
