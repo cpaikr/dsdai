@@ -75,7 +75,10 @@ cell outside its table makes the check `needsJudgment`, with a `reason`.
 4. **Rerun** with `dsd foot FILE --checks checks.json`. An entry whose labels
    are no longer at its cell does not apply:
    - `moved`: the labels are at one other cell, given in `found`. Confirm
-     it in the table, then update the entry's target and terms.
+     it in the table, then update the entry's target and terms. A
+     replacement or dismissal must also take the current proposal's id
+     from the new result (`v:T12.R10.C2`), because a proposal's id names
+     its cell; an added check keeps its own id.
    - `stale`: the labels are gone or ambiguous. Re-inspect, then restate or
      remove the entry.
 
