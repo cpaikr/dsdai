@@ -107,8 +107,6 @@ struct Grid<'a> {
     words: Vec<Vec<String>>,
     /// `[row-1][col-1]`: the figure is a lone nil dash.
     dash: Vec<Vec<bool>>,
-    /// Columns holding a percentage.
-    percent: Vec<bool>,
 }
 
 impl<'a> Grid<'a> {
@@ -120,7 +118,6 @@ impl<'a> Grid<'a> {
         let mut words = vec![Vec::new(); nrows];
         let mut first_data = nrows + 1;
         let mut dash = vec![vec![false; ncols]; nrows];
-        let mut percent = vec![false; ncols];
         for r in 1..=nrows {
             for c in 1..=ncols {
                 let Some(cell) = table.cell_at_grid(r - 1, c - 1) else {
@@ -135,13 +132,17 @@ impl<'a> Grid<'a> {
                 if raw.trim().is_empty() {
                     continue;
                 }
-                if let Some(a) = amount::parse(&raw) {
+                // A percentage is a figure that never adds up: a rate row
+                // (평균유효세율) under a column of amounts is not one of them.
+                let figure = amount::parse(&raw).filter(|a| !a.format.contains('%'));
+                if let Some(a) = figure {
                     v[r - 1][c - 1] = V::Num(a.value);
                     dash[r - 1][c - 1] = raw.trim() == "-";
-                    percent[c - 1] |= a.format.contains('%');
                     if doc.tag(cell.node) != "TH" {
                         first_data = first_data.min(r);
                     }
+                } else if amount::parse(&raw).is_some() {
+                    v[r - 1][c - 1] = V::Text;
                 } else {
                     v[r - 1][c - 1] = V::Text;
                     if label[r - 1].is_none() {
@@ -151,19 +152,8 @@ impl<'a> Grid<'a> {
                 }
             }
         }
-        let mut g = Self {
-            doc,
-            table,
-            nrows,
-            v,
-            first_data,
-            figure_cols: Vec::new(),
-            groups: Vec::new(),
-            label,
-            words,
-            dash,
-            percent,
-        };
+        let mut g =
+            Self { doc, table, nrows, v, first_data, figure_cols: Vec::new(), groups: Vec::new(), label, words, dash };
         g.figure_cols = (1..=ncols).filter(|&c| g.is_figure_col(c)).collect();
         g.groups = g.period_groups();
         g
@@ -177,11 +167,11 @@ impl<'a> Grid<'a> {
         self.first_data..=self.nrows
     }
 
-    /// A column of figures that add up: more figures than text below the
-    /// header, no percentages, and not labelled as note references (`주석`)
+    /// A column of figures that add up: more figures than text (percentages
+    /// count as text) below the header, and not labelled as note references (`주석`)
     /// or as a rate, price, average, count of issues, or date.
     fn is_figure_col(&self, c: usize) -> bool {
-        if self.percent[c - 1] || col_label(self.doc, self.table, c).is_some_and(|l| !additive(&l)) {
+        if col_label(self.doc, self.table, c).is_some_and(|l| !additive(&l)) {
             return false;
         }
         let (mut nums, mut texts) = (0, 0);
@@ -413,14 +403,14 @@ impl<'a> Grid<'a> {
     }
 
     /// The period groups where `cand` can make `t` a total: the target is a
-    /// figure, the parts hold no text, and the target is not a lone dash
-    /// over non-zero parts (a total left out, not a total of zero).
+    /// figure, the parts hold no text, and the target is not a lone dash over
+    /// parts that do not net to zero (a total left out, not a total of zero).
     fn applicable(&self, t: usize, cand: &Cand) -> Vec<&Vec<usize>> {
         self.groups
             .iter()
             .filter(|g| {
                 let Some((c, V::Num(_))) = self.in_group(g, t) else { return false };
-                self.sum(g, cand).is_some() && !(self.dash[t - 1][c - 1] && self.nonzero_terms(g, cand) > 0)
+                self.sum(g, cand).is_some_and(|s| !self.dash[t - 1][c - 1] || equal(s, 0.0))
             })
             .collect()
     }
@@ -872,12 +862,10 @@ impl<'a> Grid<'a> {
     /// The rows where `cand` can make column `target` a total (as
     /// [`Grid::applicable`] for columns).
     fn applicable_rows(&self, target: usize, cand: &Cand) -> Vec<usize> {
-        let nonzero = |r: usize| cand.iter().filter(|&&(_, c)| matches!(self.at(r, c), V::Num(x) if x != 0.0)).count();
         self.data_rows()
             .filter(|&r| {
                 matches!(self.at(r, target), V::Num(_))
-                    && self.row_sum(r, cand).is_some()
-                    && !(self.dash[r - 1][target - 1] && nonzero(r) > 0)
+                    && self.row_sum(r, cand).is_some_and(|s| !self.dash[r - 1][target - 1] || equal(s, 0.0))
             })
             .collect()
     }
@@ -907,7 +895,10 @@ impl<'a> Grid<'a> {
             let nontrivial =
                 holding.iter().filter(|&&r| self.at(r, target) != V::Num(0.0) || nonzero(r, cand) > 0).count();
             if *strict {
-                let substantive = holding.iter().filter(|&&r| nonzero(r, cand) >= 2).count();
+                // Rows where the total itself is 0 prove nothing about a column
+                // found without a label (parts that net to zero beside a dash).
+                let substantive =
+                    holding.iter().filter(|&&r| nonzero(r, cand) >= 2 && self.at(r, target) != V::Num(0.0)).count();
                 // More than half its rows, so a coincidence in some rows
                 // cannot assert a total that the others then fail.
                 if holding.len() < 2 || holding.len() * 2 <= rows.len() || substantive < 2 {
@@ -1322,6 +1313,61 @@ mod tests {
             &[&["갑", "100", "1"], &["을", "200", "2"], &["합 계", "300", "-"]],
         ));
         assert_eq!(lines(&foot(&d)), ["v:T1.R4.C2 LabelTotal Pass +R2-3C2-2"]);
+    }
+
+    #[test]
+    fn a_lone_dash_over_parts_that_net_to_zero_is_a_total_of_zero() {
+        // 회원권 moves out entirely: its closing is a dash, and the row adds up.
+        let d = doc(&table(
+            &["구 분", "기초", "취득", "대체", "합계"],
+            &[
+                &["회원권", "100", "-", "(100)", "-"],
+                &["소프트웨어", "50", "10", "100", "160"],
+                &["합 계", "150", "10", "-", "160"],
+            ],
+        ));
+        let r = foot(&d);
+        let row2: Vec<&str> = r.checks.iter().filter(|c| c.target.row == 2).map(|c| c.id.as_str()).collect();
+        assert_eq!(row2, ["h:T1.R2.C5"]);
+        assert!(r.checks.iter().all(|c| c.status == Status::Pass));
+    }
+
+    #[test]
+    fn rows_that_net_to_zero_do_not_make_a_column_a_total() {
+        // 손상차손누계액 equals 취득원가 + 상각누계액 only where all three are spent.
+        let d = doc(&table(
+            &["구 분", "취득원가", "상각누계액", "손상차손누계액", "장부금액"],
+            &[
+                &["가", "100", "(60)", "-", "40"],
+                &["나", "50", "(20)", "(5)", "25"],
+                &["다", "10", "(10)", "-", "-"],
+                &["라", "8", "(8)", "-", "-"],
+                &["합 계", "168", "(98)", "(5)", "65"],
+            ],
+        ));
+        let r = foot(&d);
+        assert!(
+            r.checks.iter().all(|c| !(c.id.starts_with("h:") && c.target.col == 4)),
+            "{:?}",
+            r.checks.iter().map(|c| &c.id).collect::<Vec<_>>()
+        );
+        assert!(r.checks.iter().all(|c| c.status == Status::Pass));
+    }
+
+    #[test]
+    fn a_rate_row_does_not_take_its_column_out_of_the_sums() {
+        let d = doc(&table(
+            &["구 분", "당 기", "전 기"],
+            &[
+                &["조정사항", "", ""],
+                &["  가", "10", "20"],
+                &["  나", "(3)", "5"],
+                &["소 계", "7", "25"],
+                &["평균유효세율", "1.3%", "14.3%"],
+            ],
+        ));
+        let ids: Vec<String> = foot(&d).checks.iter().map(|c| format!("{} {:?}", c.id, c.status)).collect();
+        assert_eq!(ids, ["v:T1.R5.C2 Pass", "v:T1.R5.C3 Pass"]);
     }
 
     #[test]

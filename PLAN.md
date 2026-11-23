@@ -18,7 +18,7 @@ confidentiality rules in [AGENTS.md](AGENTS.md) apply to every example here.
 |---|---|
 | Branch | `feat/footing` (Phase 1 merged to `main` with PR #18) |
 | Phase 1 | Done. Gate passed; the owner reviewed the working sample in Excel and signed off (2026-11-13) |
-| Phase 2 | 2.1–2.6 done. Next action: step 2.7 (gate on the working sample, with the owner) |
+| Phase 2 | 2.1–2.6 done; 2.7 gate prepared (report kept with the sample, outside the repository). Next action: owner sign-off |
 
 Update this table and the step checkboxes as work lands. Record decisions made
 along the way under [Decisions](#decisions), not in commit messages only.
@@ -594,6 +594,20 @@ Recorded during implementation:
   count, and each table's range in this workbook. `dsd xlsx` output is
   unchanged. Unresolved totals, candidates, and uncovered cells are not
   rendered; they stay in the JSON for the agent.
+- **Gate findings (2.7).** Comparing with the reference workbook on the
+  working sample found three proposer gaps, now fixed:
+  - **Percentages:** a percentage cell is a figure that never sums. A rate
+    row under a column of amounts used to take the whole column out of
+    every sum.
+  - **Dashes over netting parts:** a lone `-` over parts that net to zero
+    is a total of zero, not a total left out.
+  - **Unlabelled total columns:** these need at least two holding rows
+    whose total is not 0. Rows that net to zero beside a dash had made a
+    coincidence look like a total.
+
+  Movement schedules: wherever the reference workbook reports a
+  difference (its formulas leave out the opening column), the matching
+  checks here pass.
 - **Column labels (2.3).** A unit caption heading the whole table is not
   part of a column label (it had made every label start `(단위: 원) /`).
 - **Corpus (2.3).** Each proposer is measured on every private sample for
